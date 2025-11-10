@@ -34,7 +34,8 @@ class PDFDownloader:
         path.write_bytes(content)
         return path
 
-    def try_download(self, doi: str) -> Optional[Path]:
+    def try_download(self, doi: str, **kwargs) -> Optional[Path]:
+        # Accept extra kwargs to allow passing optional params (e.g., email) to specific strategies.
         raise NotImplementedError
 
 
@@ -42,8 +43,10 @@ class PDFDownloader:
 class UnpaywallDownloader(PDFDownloader):
     api = "https://api.unpaywall.org/v2/"
 
-    def try_download(self, doi: str) -> Optional[Path]:
-        email = generate_random_email()
+    def try_download(self, doi: str, email: Optional[str] = None, **kwargs) -> Optional[Path]:
+        # Email is provided by the caller (PDFDownloadManager). Fall back to random generation if needed.
+        if not email:
+            email = generate_random_email()
         api_url = f"{self.api}{doi}?email={email}"
         logging.info(f"Unpaywall: querying API at {api_url}")
         resp = self._get(api_url)
@@ -198,24 +201,59 @@ class PDFDownloadManager:
         self.download_dir = download_dir
         self.results = []
 
-    def download(self, doi: str) -> Tuple[str, str]:
-        logging.info(f"--- Starting download process for DOI: {doi} ---")
-        for s in self.strategies:
-            logging.info(f"Trying strategy: {s.__class__.__name__}")
-            try:
-                path = s.try_download(doi)
-                if path:
-                    logging.info(f"SUCCESS with {s.__class__.__name__}. Saved to: {path}")
-                    self.results.append({"doi": doi, "success": True})
-                    return doi, "success"
-                else:
-                    logging.warning(f"FAIL with {s.__class__.__name__}. PDF not found.")
-            except Exception as e:
-                logging.error(f"ERROR during {s.__class__.__name__} strategy: {e}", exc_info=True)
+    def download(self, dois) -> Optional[object]:
+        """
+        Accept a single DOI (str) or an iterable/list of DOIs.
+        Regenerates the email every 50 downloads and passes the email only to UnpaywallDownloader.
+        Returns a tuple (doi, "success"|"fail") for a single DOI input, or a list of such tuples for many.
+        """
+        # Normalize input to an iterable and detect single vs multiple
+        single_input = isinstance(dois, str)
+        if single_input:
+            dois_iter = [dois]
+        else:
+            dois_iter = list(dois)
 
-        logging.error(f"No PDF found for {doi} after all strategies.")
-        self.results.append({"doi": doi, "success": False})
-        return doi, "fail"
+        results_list = []
+        # initial email for the first batch
+        current_email = generate_random_email()
+        logging.info(f"Starting download for {len(dois_iter)} DOI(s). Initial email generated.")
+
+        for idx, doi in enumerate(dois_iter):
+            # regenerate every 50 downloads (after the first batch)
+            if idx > 0 and idx % 50 == 0:
+                current_email = generate_random_email()
+                logging.info(f"Regenerated email for batch starting at index {idx}.")
+
+            logging.info(f"--- Starting download process for DOI: {doi} ---")
+            doi_result = ("", "fail")
+            for s in self.strategies:
+                logging.info(f"Trying strategy: {s.__class__.__name__}")
+                try:
+                    # Only pass email to UnpaywallDownloader
+                    if isinstance(s, UnpaywallDownloader):
+                        path = s.try_download(doi, email=current_email)
+                    else:
+                        path = s.try_download(doi)
+
+                    if path:
+                        logging.info(f"SUCCESS with {s.__class__.__name__}. Saved to: {path}")
+                        self.results.append({"doi": doi, "success": True})
+                        doi_result = (doi, "success")
+                        break
+                    else:
+                        logging.warning(f"FAIL with {s.__class__.__name__}. PDF not found.")
+                except Exception as e:
+                    logging.error(f"ERROR during {s.__class__.__name__} strategy: {e}", exc_info=True)
+
+            if doi_result[1] == "fail":
+                logging.error(f"No PDF found for {doi} after all strategies.")
+                self.results.append({"doi": doi, "success": False})
+
+            results_list.append(doi_result)
+
+        # return single tuple for single input, else list
+        return results_list[0] if single_input and results_list else results_list
 
     def save_results_to_csv(self):
         """Saves the download results to a CSV file in the download directory."""
@@ -253,7 +291,7 @@ if __name__ == "__main__":
     manager = PDFDownloadManager(strategies=strategies, download_dir=download_dir)
     
     if dois:
-        for doi in dois:
-            manager.download(doi)
+        # single call handles list of DOIs and will regenerate email every 50 downloads
+        manager.download(dois)
         manager.save_results_to_csv()
 # --- end of file ---

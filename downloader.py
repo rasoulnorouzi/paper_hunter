@@ -1,7 +1,14 @@
 # %%
 import requests
 from pathlib import Path
-from bs4 import BeautifulSoup
+# Ensure BeautifulSoup is available; attempt to install if missing.
+try:
+    from bs4 import BeautifulSoup
+except ModuleNotFoundError:
+    import sys, subprocess
+    print("Missing dependency 'bs4' (beautifulsoup4). Attempting to install via pip...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4", "lxml"])
+    from bs4 import BeautifulSoup
 from utility import _sanitize_doi
 import random
 from urllib.parse import urljoin
