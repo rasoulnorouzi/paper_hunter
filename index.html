@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Batch Scholar: Fast DOI Downloader</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    
+    <style>
+        .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+        .scrollbar-thin::-webkit-scrollbar-track { background: #f1f1f1; }
+        .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        @keyframes pulse-fast { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+        .animate-pulse-fast { animation: pulse-fast 1s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans">
+
+    <!-- Header -->
+    <header class="bg-white shadow-sm border-b border-slate-200 sticky top-0 z-50">
+        <div class="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <div class="bg-indigo-600 text-white p-1.5 rounded">
+                    <i class="fa-solid fa-bolt"></i>
+                </div>
+                <h1 class="text-lg font-bold text-slate-800">Batch<span class="text-indigo-600">Scholar</span> <span class="text-slate-400 font-normal text-sm ml-2">Instant Zip</span></h1>
+            </div>
+            <div class="text-xs text-slate-400 font-mono">v3.2 Robust Mode</div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-grow p-4 max-w-6xl mx-auto w-full gap-6 flex flex-col md:flex-row">
+        
+        <!-- Input Panel -->
+        <div class="w-full md:w-1/3 space-y-4">
+            <div class="bg-white p-5 rounded-lg shadow-sm border border-slate-200">
+                <div class="space-y-3">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Email (API Requirement)</label>
+                        <input type="email" id="userEmail" placeholder="Auto-generated if empty..." class="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:ring-2 focus:ring-indigo-500 outline-none" />
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-1">DOIs (One per line)</label>
+                        <textarea id="doiInput" rows="10" class="w-full px-3 py-2 border border-slate-300 rounded font-mono text-xs focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="10.1371/journal.pcbi.1004668&#10;10.1038/nature12345"></textarea>
+                    </div>
+                    <div class="flex gap-2 pt-2">
+                        <button onclick="startProcessing()" id="startBtn" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded font-semibold transition-colors shadow-sm flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-play"></i> Start Download
+                        </button>
+                        <button onclick="stopProcessing()" id="stopBtn" class="hidden flex-1 bg-red-500 hover:bg-red-600 text-white py-2 rounded font-semibold transition-colors shadow-sm flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-stop"></i> Stop
+                        </button>
+                        <button onclick="clearAll()" class="px-3 py-2 border border-slate-300 rounded text-slate-600 hover:bg-slate-50">
+                            <i class="fa-solid fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Simple Stats -->
+            <div class="grid grid-cols-2 gap-2">
+                <div class="bg-white p-3 rounded border border-slate-200 text-center">
+                    <div class="text-[10px] uppercase font-bold text-slate-400">Success</div>
+                    <div id="successCount" class="text-xl font-bold text-emerald-600">0</div>
+                </div>
+                <div class="bg-white p-3 rounded border border-slate-200 text-center">
+                    <div class="text-[10px] uppercase font-bold text-slate-400">Missed / Closed</div>
+                    <div id="failedCount" class="text-xl font-bold text-red-500">0</div>
+                </div>
+            </div>
+            
+            <div id="zipCard" class="hidden bg-emerald-50 border border-emerald-200 p-4 rounded-lg text-center fade-in">
+                <p class="text-emerald-800 text-sm mb-2 font-medium">Downloads ready!</p>
+                <button onclick="saveZip()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded shadow-sm font-bold transition-colors">
+                    <i class="fa-solid fa-file-zipper mr-1"></i> Save ZIP Now
+                </button>
+            </div>
+        </div>
+
+        <!-- Results Panel -->
+        <div class="w-full md:w-2/3 flex flex-col h-[600px] bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+            <div class="p-3 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
+                <h2 class="font-bold text-slate-700 text-sm"><i class="fa-solid fa-list-ul mr-2 text-slate-400"></i>Queue</h2>
+                <span id="statusText" class="text-xs text-slate-500 font-mono">Waiting...</span>
+            </div>
+            <div class="flex-grow overflow-auto scrollbar-thin relative">
+                <table class="w-full text-left border-collapse">
+                    <tbody id="resultsBody" class="text-sm divide-y divide-slate-100">
+                        <tr>
+                            <td class="p-8 text-center text-slate-400 italic">
+                                Add DOIs and click start.<br>Files will download automatically.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <!-- Progress Bar (Bottom) -->
+            <div class="h-1.5 bg-slate-100 w-full">
+                <div id="progressBar" class="h-full bg-indigo-500 transition-all duration-300" style="width: 0%"></div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // --- Configuration ---
+        const PROXIES = [
+            "https://api.codetabs.com/v1/proxy?quest=",
+            "https://corsproxy.io/?",
+            "https://thingproxy.freeboard.io/fetch/"
+        ];
+
+        // --- State ---
+        let queue = [];
+        let isRunning = false;
+        let zipData = new JSZip(); // We build the zip AS we go
+        let processedCount = 0;
+
+        // --- Utils ---
+        const wait = (ms) => new Promise(r => setTimeout(r, ms));
+        const cleanDOI = (s) => s.trim().replace(/^https?:\/\/doi\.org\//i, '').replace(/^doi:/i, '');
+        const generateEmail = () => `guest_${Math.random().toString(36).slice(2,8)}@gmail.com`;
+
+        // --- Main Process ---
+        async function startProcessing() {
+            const input = document.getElementById('doiInput').value;
+            let email = document.getElementById('userEmail').value;
+            
+            if (!email) {
+                email = generateEmail();
+                document.getElementById('userEmail').value = email;
+            }
+
+            const lines = input.split('\n').map(cleanDOI).filter(d => d.length > 4);
+            if (lines.length === 0) return alert("No DOIs found");
+
+            // Reset State
+            queue = lines.map((doi, i) => ({ id: i+1, doi, status: 'pending', title: '...' }));
+            zipData = new JSZip();
+            processedCount = 0;
+            document.getElementById('successCount').textContent = '0';
+            document.getElementById('failedCount').textContent = '0';
+            document.getElementById('resultsBody').innerHTML = '';
+            document.getElementById('zipCard').classList.add('hidden');
+            
+            // UI Update
+            renderList();
+            toggleRunning(true);
+
+            // Process Loop
+            for (let i = 0; i < queue.length; i++) {
+                if (!isRunning) break;
+                await processOne(queue[i], email, lines.length);
+            }
+
+            toggleRunning(false);
+            if (Object.keys(zipData.files).length > 0) {
+                document.getElementById('zipCard').classList.remove('hidden');
+            }
+            document.getElementById('statusText').textContent = "Process Complete";
+        }
+
+        function stopProcessing() {
+            isRunning = false;
+            document.getElementById('statusText').textContent = "Stopping...";
+        }
+
+        async function processOne(item, email, total) {
+            updateRowUI(item.id, "Fetching Metadata...", "text-blue-500 animate-pulse-fast");
+            
+            let pdfUrl = null;
+            let title = item.doi;
+            let filename = `paper_${item.id}.pdf`;
+
+            try {
+                // 1. Metadata (OpenAlex)
+                const metaUrl = `https://api.openalex.org/works/https://doi.org/${item.doi}?mailto=${email}`;
+                const metaRes = await fetch(metaUrl).catch(() => null);
+                
+                if (metaRes && metaRes.ok) {
+                    const data = await metaRes.json();
+                    title = data.title || title;
+                    const author = data.authorships?.[0]?.author?.display_name?.split(' ').pop() || "Unknown";
+                    const year = data.publication_year || "0000";
+                    const safeTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 40);
+                    filename = `${year}_${author}_${safeTitle}.pdf`;
+                    
+                    // Direct Link?
+                    pdfUrl = data.open_access?.oa_url || data.best_oa_location?.pdf_url;
+                    
+                    // Update Title UI
+                    const titleEl = document.getElementById(`title-${item.id}`);
+                    if(titleEl) titleEl.innerText = title;
+                }
+
+                // 2. Unpaywall (Secondary Check)
+                if (!pdfUrl) {
+                    // updateRowUI(item.id, "Checking Unpaywall...", "text-blue-400"); // Optional UI
+                    try {
+                        const upwUrl = `https://api.unpaywall.org/v2/${item.doi}?email=${email}`;
+                        const upwRes = await fetch(upwUrl).catch(() => null);
+                        if (upwRes && upwRes.ok) {
+                            const upwData = await upwRes.json();
+                            // Update title if OpenAlex failed completely
+                            if (title === item.doi && upwData.title) {
+                                title = upwData.title;
+                                const titleEl = document.getElementById(`title-${item.id}`);
+                                if(titleEl) titleEl.innerText = title;
+                            }
+                            
+                            if (upwData.best_oa_location && upwData.best_oa_location.url_for_pdf) {
+                                pdfUrl = upwData.best_oa_location.url_for_pdf;
+                            }
+                        }
+                    } catch (e) { /* Ignore Unpaywall errors */ }
+                }
+
+                // 3. Deep Scan (Automatic if no link)
+                if (!pdfUrl) {
+                    updateRowUI(item.id, "Scanning Publisher...", "text-purple-500");
+                    pdfUrl = await deepScan(item.doi);
+                }
+
+                // 4. Download Blob (Immediate)
+                if (pdfUrl) {
+                    updateRowUI(item.id, "Downloading File...", "text-orange-500");
+                    
+                    // Artificial random delay to avoid 403 (Humanize)
+                    await wait(Math.random() * 1500 + 500);
+
+                    const blob = await fetchBlob(pdfUrl);
+                    
+                    // Add to ZIP immediately (in memory)
+                    zipData.file(filename, blob);
+                    
+                    // Success UI
+                    updateRowUI(item.id, "Saved to Memory", "text-emerald-600 font-bold");
+                    document.getElementById('successCount').textContent = parseInt(document.getElementById('successCount').textContent) + 1;
+                } else {
+                    throw new Error("No PDF found");
+                }
+
+            } catch (err) {
+                // Suppress "No PDF found" console spam, log others
+                if (err.message !== "No PDF found") console.warn(err);
+                
+                document.getElementById('failedCount').textContent = parseInt(document.getElementById('failedCount').textContent) + 1;
+                
+                if (pdfUrl) {
+                    // Case 1: We found a link, but auto-download blocked/failed
+                    const statusEl = document.getElementById(`status-${item.id}`);
+                    statusEl.innerHTML = `<a href="${pdfUrl}" target="_blank" class="text-amber-600 hover:text-amber-800 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-external-link-alt"></i> Manual Download</a>`;
+                } else {
+                    // Case 2: No link found at all (Closed Source)
+                    updateRowUI(item.id, "Non-Open Access", "text-slate-400 font-medium italic");
+                }
+            }
+
+            // Progress Bar
+            processedCount++;
+            const pct = (processedCount / total) * 100;
+            document.getElementById('progressBar').style.width = `${pct}%`;
+            document.getElementById('statusText').textContent = `Processing ${processedCount}/${total}`;
+        }
+
+        // --- Scraper Logic ---
+        async function deepScan(doi) {
+            const target = `https://doi.org/${doi}`;
+            
+            for (const proxy of PROXIES) {
+                try {
+                    const res = await fetch(proxy + encodeURIComponent(target), { credentials: 'omit' });
+                    if (!res.ok) continue;
+                    const html = await res.text();
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+
+                    // Strategy A: Meta Tags
+                    const meta = doc.querySelector('meta[name="citation_pdf_url"]');
+                    if (meta && meta.content) return meta.content;
+
+                    // Strategy B: Base URL + Relative Links
+                    let baseUrl = "";
+                    try { 
+                        // Attempt to find original domain from canonical or OG
+                        const og = doc.querySelector('meta[property="og:url"]');
+                        if(og) baseUrl = new URL(og.content).origin;
+                    } catch(e){}
+
+                    // Strategy C: Link Hunting
+                    const links = Array.from(doc.querySelectorAll('a'));
+                    for (const a of links) {
+                        let href = a.getAttribute('href');
+                        if (!href) continue;
+                        
+                        // Fix relative links
+                        if (href.startsWith('/') && baseUrl) href = baseUrl + href;
+                        // If we still don't have a base URL, relative links are useless here
+                        if (!href.startsWith('http')) continue;
+
+                        const lower = href.toLowerCase();
+                        // OUP specific or generic PDF
+                        if (lower.includes('/article-pdf/') || lower.endsWith('.pdf')) {
+                            return href;
+                        }
+                    }
+                } catch (e) { continue; }
+            }
+            return null;
+        }
+
+        async function fetchBlob(url) {
+            // Try direct first (for open Access)
+            try {
+                const res = await fetch(url);
+                if(res.ok) {
+                    const b = await res.blob();
+                    if(b.size > 1000 && (await b.slice(0,4).text()) === '%PDF') return b;
+                }
+            } catch(e) {}
+
+            // Try Proxies
+            for (const proxy of PROXIES) {
+                try {
+                    const res = await fetch(proxy + encodeURIComponent(url), { credentials: 'omit' });
+                    if (!res.ok) continue;
+                    const blob = await res.blob();
+                    if (blob.size < 1000) throw new Error("Empty file");
+                    const header = await blob.slice(0, 4).text();
+                    if (header !== '%PDF') throw new Error("Not a PDF");
+                    return blob;
+                } catch (e) {}
+            }
+            throw new Error("Download failed");
+        }
+
+        // --- UI Functions ---
+        function renderList() {
+            const tbody = document.getElementById('resultsBody');
+            tbody.innerHTML = queue.map(item => `
+                <tr class="border-b border-slate-100 hover:bg-slate-50">
+                    <td class="p-3 w-10 text-slate-300 text-xs font-mono">${item.id}</td>
+                    <td class="p-3">
+                        <div id="title-${item.id}" class="text-xs font-bold text-slate-700 mb-1 truncate w-[300px] md:w-[400px]">${item.doi}</div>
+                        <div class="text-[10px] text-slate-400 font-mono">${item.doi}</div>
+                    </td>
+                    <td class="p-3 w-36 text-right">
+                        <span id="status-${item.id}" class="text-xs font-bold text-slate-400">Pending</span>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function updateRowUI(id, text, classes) {
+            const el = document.getElementById(`status-${id}`);
+            if (el) {
+                el.textContent = text;
+                el.className = `text-xs font-bold ${classes}`;
+            }
+        }
+
+        function toggleRunning(active) {
+            isRunning = active;
+            const start = document.getElementById('startBtn');
+            const stop = document.getElementById('stopBtn');
+            if (active) {
+                start.classList.add('hidden');
+                stop.classList.remove('hidden');
+                document.getElementById('doiInput').disabled = true;
+            } else {
+                start.classList.remove('hidden');
+                stop.classList.add('hidden');
+                document.getElementById('doiInput').disabled = false;
+            }
+        }
+
+        function saveZip() {
+            zipData.generateAsync({ type: "blob" }).then(content => {
+                saveAs(content, `papers_batch_${new Date().toISOString().slice(0,10)}.zip`);
+            });
+        }
+
+        function clearAll() {
+            if(confirm("Clear everything?")) {
+                document.getElementById('doiInput').value = '';
+                document.getElementById('resultsBody').innerHTML = '';
+                document.getElementById('successCount').textContent = '0';
+                document.getElementById('failedCount').textContent = '0';
+                document.getElementById('progressBar').style.width = '0%';
+                document.getElementById('zipCard').classList.add('hidden');
+            }
+        }
+    </script>
+</body>
+</html>
