@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,43 +154,154 @@ class SciHubDownloader(PDFDownloader):
         super().__init__(headers, download_dir)
         self.mirrors = mirrors
 
+    def _extract_pdf_url(self, soup: BeautifulSoup, base_url: str) -> Optional[str]:
+        """
+        Extract PDF URL from Sci-Hub page using multiple detection methods.
+        Sci-Hub's HTML structure varies, so we try several approaches.
+        """
+        pdf_url = None
+        
+        # Method 1: Look for embed tag with id='pdf'
+        embed_tag = soup.find('embed', id='pdf')
+        if embed_tag and embed_tag.get('src'):
+            pdf_url = embed_tag.get('src')
+            logging.info("Found PDF via embed#pdf tag")
+        
+        # Method 2: Look for any embed tag with PDF src
+        if not pdf_url:
+            for embed in soup.find_all('embed'):
+                src = embed.get('src', '')
+                if src and ('.pdf' in src.lower() or '/pdf/' in src.lower() or '/downloads/' in src.lower()):
+                    pdf_url = src
+                    logging.info("Found PDF via embed tag with PDF src")
+                    break
+        
+        # Method 3: Look for iframe with PDF src
+        if not pdf_url:
+            for iframe in soup.find_all('iframe'):
+                src = iframe.get('src', '')
+                if src and ('.pdf' in src.lower() or '/pdf/' in src.lower() or '/downloads/' in src.lower()):
+                    pdf_url = src
+                    logging.info("Found PDF via iframe tag")
+                    break
+        
+        # Method 4: Look for direct PDF link in buttons or onclick handlers
+        if not pdf_url:
+            for button in soup.find_all('button'):
+                onclick = button.get('onclick', '')
+                # Extract URL from onclick like: location.href='//sci-hub...pdf'
+                match = re.search(r'location\.href\s*=\s*[\'"]([^\'"]+\.pdf[^\'"]*)[\'"]', onclick, re.IGNORECASE)
+                if match:
+                    pdf_url = match.group(1)
+                    logging.info("Found PDF via button onclick")
+                    break
+        
+        # Method 5: Look for anchor tags with PDF href
+        if not pdf_url:
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                # Look for links that contain sci-hub domains and .pdf extension
+                if '.pdf' in href.lower() and ('sci-hub' in href.lower() or href.startswith('/') or href.startswith('//')):                    
+                    pdf_url = href
+                    logging.info("Found PDF via anchor tag")
+                    break
+        
+        # Method 6: Search in all src attributes
+        if not pdf_url:
+            for tag in soup.find_all(src=True):
+                src = tag['src']
+                if '.pdf' in src.lower() or '/downloads/' in src.lower():
+                    pdf_url = src
+                    logging.info(f"Found PDF via {tag.name} src attribute")
+                    break
+        
+        # Method 7: Look for PDF URL in script tags or page content
+        if not pdf_url:
+            page_text = str(soup)
+            # Pattern for Sci-Hub PDF URLs
+            patterns = [
+                r'(//[^"\s]+\.pdf(?:\?[^"\s]*)?)',
+                r'(https?://[^"\s]+\.pdf(?:\?[^"\s]*)?)',
+                r'(/downloads/[^"\s]+)',
+                r'(/pdf/[^"\s]+\.pdf)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    pdf_url = match.group(1)
+                    logging.info(f"Found PDF via regex pattern in page content")
+                    break
+        
+        if pdf_url:
+            # Normalize the URL
+            if pdf_url.startswith('//'):
+                pdf_url = 'https:' + pdf_url
+            elif not pdf_url.startswith('http'):
+                pdf_url = urljoin(base_url, pdf_url)
+            return pdf_url
+        
+        return None
+
     def try_download(self, doi: str) -> Optional[Path]:
         logging.info(f"Sci-Hub: trying mirrors for {doi}")
         shuffled_mirrors = self.mirrors.copy()
         random.shuffle(shuffled_mirrors)
+        
+        # URL-encode the DOI to handle special characters properly
+        from urllib.parse import quote
+        encoded_doi = quote(doi, safe='')
 
         for mirror in shuffled_mirrors:
-            scihub_url = mirror + doi
-            logging.info(f"Trying mirror: {mirror}")
+            # Try both encoded and raw DOI (some mirrors handle them differently)
+            doi_variants = [doi, encoded_doi]
             
-            try:
-                response = requests.get(scihub_url, headers=self.headers, timeout=15)
-                response.raise_for_status()
-            except requests.RequestException as e:
-                logging.warning(f"Request to mirror {mirror} failed: {e}")
-                continue
-
-            soup = BeautifulSoup(response.content, 'lxml')
-            embed_tag = soup.find('embed', id='pdf')
-            
-            if embed_tag and embed_tag.get('src'):
-                pdf_url = embed_tag.get('src')
+            for doi_variant in doi_variants:
+                scihub_url = mirror + doi_variant
+                logging.info(f"Trying mirror: {mirror} with DOI: {doi_variant}")
                 
-                if pdf_url.startswith('//'):
-                    pdf_url = 'https:' + pdf_url
-                elif not pdf_url.startswith('http'):
-                    pdf_url = urljoin(response.url, pdf_url)
+                try:
+                    response = requests.get(scihub_url, headers=self.headers, timeout=20, allow_redirects=True)
+                    response.raise_for_status()
+                except requests.RequestException as e:
+                    logging.warning(f"Request to mirror {mirror} failed: {e}")
+                    continue
 
-                logging.info(f"Found PDF URL: {pdf_url}")
-                pdf = self._get(pdf_url, timeout=30)
+                # Check if we got redirected directly to a PDF
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'application/pdf' in content_type:
+                    logging.info(f"Direct PDF response from {mirror}")
+                    if response.content and len(response.content) > 1000:  # Sanity check for valid PDF
+                        return self._save_pdf(doi, response.content)
 
-                if pdf and pdf.status_code == 200 and pdf.content:
-                    return self._save_pdf(doi, pdf.content)
+                soup = BeautifulSoup(response.content, 'lxml')
+                
+                # Check if we got an error page (no paper found)
+                error_indicators = soup.find_all(string=re.compile(r'article not found|not found in database|unavailable', re.IGNORECASE))
+                if error_indicators:
+                    logging.warning(f"Paper not found on {mirror}")
+                    continue
+                
+                pdf_url = self._extract_pdf_url(soup, response.url)
+                
+                if pdf_url:
+                    logging.info(f"Found PDF URL: {pdf_url}")
+                    
+                    try:
+                        pdf = requests.get(pdf_url, headers=self.headers, timeout=30, allow_redirects=True)
+                        
+                        if pdf and pdf.status_code == 200 and pdf.content:
+                            # Verify it's actually a PDF (check magic bytes)
+                            if pdf.content[:4] == b'%PDF' or len(pdf.content) > 10000:
+                                return self._save_pdf(doi, pdf.content)
+                            else:
+                                logging.warning(f"Downloaded content doesn't appear to be a valid PDF")
+                        else:
+                            status = pdf.status_code if pdf else "N/A"
+                            logging.warning(f"Failed to download PDF from {pdf_url}. Status: {status}")
+                    except requests.RequestException as e:
+                        logging.warning(f"Failed to download PDF: {e}")
                 else:
-                    status = pdf.status_code if pdf else "N/A"
-                    logging.warning(f"Failed to download PDF from {pdf_url}. Status: {status}")
-            else:
-                logging.warning("Could not find embed tag with PDF source on the page.")
+                    logging.warning(f"Could not find PDF URL on the page from {mirror}")
         
         return None
 

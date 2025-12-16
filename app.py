@@ -158,10 +158,15 @@ _init_state()
 _attach_logging()
 
 st.title("Paper Hunter – Simple Downloader")
-st.caption("Upload a CSV of DOIs, download PDFs and a summary.")
+st.caption("Enter DOIs (one per line), download PDFs and a summary.")
 
-# File uploader
-uploaded = st.file_uploader("CSV with a 'doi' column", type=["csv"], key="file_uploader")
+# Text input for DOIs (one per line)
+doi_input = st.text_area(
+    "Enter DOIs (one per line)",
+    height=150,
+    placeholder="10.1016/j.jclinepi.2022.01.014\n10.1038/nature12373\n10.1126/science.1234567",
+    key="doi_text_input"
+)
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -193,22 +198,27 @@ if stop_clicked and st.session_state.running:
     st.session_state.stop = True
 
 if run_clicked:
-    if uploaded is None:
-        st.warning("Please select a CSV file first.")
+    if not doi_input or not doi_input.strip():
+        st.warning("Please enter at least one DOI.")
     else:
-        try:
-            df = pd.read_csv(uploaded)
-        except Exception as e:
-            st.error(f"Failed to read CSV: {e}")
-            st.stop()
-
-        if "doi" not in df.columns:
-            st.error("CSV must contain a 'doi' column.")
-            st.stop()
-
-        dois = [str(x).strip() for x in df["doi"].dropna().tolist() if str(x).strip()]
+        # Parse DOIs from text input (one per line)
+        lines = doi_input.strip().split('\n')
+        dois = []
+        for line in lines:
+            # Clean each line and extract DOI
+            cleaned = line.strip()
+            if cleaned:
+                # Handle various DOI formats (URLs, doi: prefix, etc.)
+                # Extract DOI pattern if present
+                import re
+                doi_match = re.search(r'(10\.\d{4,9}/[^\s]+)', cleaned)
+                if doi_match:
+                    dois.append(doi_match.group(1))
+                elif cleaned.startswith('10.'):
+                    dois.append(cleaned)
+        
         if not dois:
-            st.error("No DOIs found in the 'doi' column.")
+            st.error("No valid DOIs found. DOIs should start with '10.' (e.g., 10.1016/j.jclinepi.2022.01.014)")
             st.stop()
 
         st.session_state.logs = []
