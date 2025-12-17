@@ -1,0 +1,25 @@
+# Virtual environment
+myenv/
+
+# Streamlit runs
+streamlit_runs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+__pycache__/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# IDE settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
