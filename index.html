@@ -3,11 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Batch Scholar: Fast DOI Downloader</title>
+    <title>Batch Scholar: DOI Link Finder</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
     
     <style>
         .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -15,6 +13,9 @@
         .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
         @keyframes pulse-fast { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
         .animate-pulse-fast { animation: pulse-fast 1s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        /* Toggle Switch */
+        .toggle-checkbox:checked { right: 0; border-color: #6366f1; }
+        .toggle-checkbox:checked + .toggle-label { background-color: #6366f1; }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans">
@@ -27,7 +28,7 @@
                     <i class="fa-solid fa-bolt"></i>
                 </div>
             </div>
-            <div class="text-xs text-slate-400 font-mono">v3.2 Robust Mode</div>
+            <div class="text-xs text-slate-400 font-mono">v3.3 Link Mode</div>
         </div>
     </header>
 
@@ -48,7 +49,7 @@
                     </div>
                     <div class="flex gap-2 pt-2">
                         <button onclick="startProcessing()" id="startBtn" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded font-semibold transition-colors shadow-sm flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-play"></i> Start Download
+                            <i class="fa-solid fa-search"></i> Find Links
                         </button>
                         <button onclick="stopProcessing()" id="stopBtn" class="hidden flex-1 bg-red-500 hover:bg-red-600 text-white py-2 rounded font-semibold transition-colors shadow-sm flex items-center justify-center gap-2">
                             <i class="fa-solid fa-stop"></i> Stop
@@ -57,26 +58,33 @@
                             <i class="fa-solid fa-trash"></i>
                         </button>
                     </div>
+                    
+                    <!-- Sci-Hub Toggle -->
+                    <div class="flex items-center justify-between pt-3 border-t border-slate-200 mt-3">
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs font-bold text-slate-500 uppercase">Sci-Hub for Non-OA</span>
+                            <span class="text-[10px] text-slate-400" title="When enabled, shows Sci-Hub links for papers without open access. When disabled, shows regular DOI links.">
+                                <i class="fa-solid fa-circle-info"></i>
+                            </span>
+                        </div>
+                        <div class="relative inline-block w-10 align-middle select-none">
+                            <input type="checkbox" id="scihubToggle" class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-2 border-slate-300 appearance-none cursor-pointer transition-all duration-200" />
+                            <label for="scihubToggle" class="toggle-label block overflow-hidden h-5 rounded-full bg-slate-300 cursor-pointer transition-colors duration-200"></label>
+                        </div>
+                    </div>
                 </div>
             </div>
 
             <!-- Simple Stats -->
             <div class="grid grid-cols-2 gap-2">
                 <div class="bg-white p-3 rounded border border-slate-200 text-center">
-                    <div class="text-[10px] uppercase font-bold text-slate-400">Success</div>
+                    <div class="text-[10px] uppercase font-bold text-slate-400">Open Access</div>
                     <div id="successCount" class="text-xl font-bold text-emerald-600">0</div>
                 </div>
                 <div class="bg-white p-3 rounded border border-slate-200 text-center">
-                    <div class="text-[10px] uppercase font-bold text-slate-400">Missed / Closed</div>
-                    <div id="failedCount" class="text-xl font-bold text-red-500">0</div>
+                    <div class="text-[10px] uppercase font-bold text-slate-400">Non-OA / Failed</div>
+                    <div id="failedCount" class="text-xl font-bold text-amber-500">0</div>
                 </div>
-            </div>
-            
-            <div id="zipCard" class="hidden bg-emerald-50 border border-emerald-200 p-4 rounded-lg text-center fade-in">
-                <p class="text-emerald-800 text-sm mb-2 font-medium">Downloads ready!</p>
-                <button onclick="saveZip()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded shadow-sm font-bold transition-colors">
-                    <i class="fa-solid fa-file-zipper mr-1"></i> Save ZIP Now
-                </button>
             </div>
         </div>
 
@@ -91,7 +99,7 @@
                     <tbody id="resultsBody" class="text-sm divide-y divide-slate-100">
                         <tr>
                             <td class="p-8 text-center text-slate-400 italic">
-                                Add DOIs and click start.<br>Files will download automatically.
+                                Add DOIs and click "Find Links".<br>Links will appear for manual download.
                             </td>
                         </tr>
                     </tbody>
@@ -111,11 +119,11 @@
             "https://corsproxy.io/?",
             "https://thingproxy.freeboard.io/fetch/"
         ];
+        const SCIHUB_BASE = "https://sci-hub.se/";
 
         // --- State ---
         let queue = [];
         let isRunning = false;
-        let zipData = new JSZip(); // We build the zip AS we go
         let processedCount = 0;
 
         // --- Utils ---
@@ -138,12 +146,10 @@
 
             // Reset State
             queue = lines.map((doi, i) => ({ id: i+1, doi, status: 'pending', title: '...' }));
-            zipData = new JSZip();
             processedCount = 0;
             document.getElementById('successCount').textContent = '0';
             document.getElementById('failedCount').textContent = '0';
             document.getElementById('resultsBody').innerHTML = '';
-            document.getElementById('zipCard').classList.add('hidden');
             
             // UI Update
             renderList();
@@ -156,9 +162,6 @@
             }
 
             toggleRunning(false);
-            if (Object.keys(zipData.files).length > 0) {
-                document.getElementById('zipCard').classList.remove('hidden');
-            }
             document.getElementById('statusText').textContent = "Process Complete";
         }
 
@@ -172,7 +175,7 @@
             
             let pdfUrl = null;
             let title = item.doi;
-            let filename = `paper_${item.id}.pdf`;
+            const useScihub = document.getElementById('scihubToggle').checked;
 
             try {
                 // 1. Metadata (OpenAlex)
@@ -182,10 +185,6 @@
                 if (metaRes && metaRes.ok) {
                     const data = await metaRes.json();
                     title = data.title || title;
-                    const author = data.authorships?.[0]?.author?.display_name?.split(' ').pop() || "Unknown";
-                    const year = data.publication_year || "0000";
-                    const safeTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 40);
-                    filename = `${year}_${author}_${safeTitle}.pdf`;
                     
                     // Direct Link?
                     pdfUrl = data.open_access?.oa_url || data.best_oa_location?.pdf_url;
@@ -197,7 +196,6 @@
 
                 // 2. Unpaywall (Secondary Check)
                 if (!pdfUrl) {
-                    // updateRowUI(item.id, "Checking Unpaywall...", "text-blue-400"); // Optional UI
                     try {
                         const upwUrl = `https://api.unpaywall.org/v2/${item.doi}?email=${email}`;
                         const upwRes = await fetch(upwUrl).catch(() => null);
@@ -223,38 +221,37 @@
                     pdfUrl = await deepScan(item.doi);
                 }
 
-                // 4. Download Blob (Immediate)
+                // 4. Show Link
                 if (pdfUrl) {
-                    updateRowUI(item.id, "Downloading File...", "text-orange-500");
-                    
-                    // Artificial random delay to avoid 403 (Humanize)
-                    await wait(Math.random() * 1500 + 500);
-
-                    const blob = await fetchBlob(pdfUrl);
-                    
-                    // Add to ZIP immediately (in memory)
-                    zipData.file(filename, blob);
-                    
-                    // Success UI
-                    updateRowUI(item.id, "Saved to Memory", "text-emerald-600 font-bold");
+                    // Open Access - Show direct PDF link
+                    const statusEl = document.getElementById(`status-${item.id}`);
+                    statusEl.innerHTML = `<a href="${pdfUrl}" target="_blank" class="text-emerald-600 hover:text-emerald-800 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-download"></i> Download PDF</a>`;
                     document.getElementById('successCount').textContent = parseInt(document.getElementById('successCount').textContent) + 1;
                 } else {
-                    throw new Error("No PDF found");
+                    // Non-Open Access - Show Sci-Hub or DOI link based on toggle
+                    const statusEl = document.getElementById(`status-${item.id}`);
+                    document.getElementById('failedCount').textContent = parseInt(document.getElementById('failedCount').textContent) + 1;
+                    
+                    if (useScihub) {
+                        const scihubLink = SCIHUB_BASE + item.doi;
+                        statusEl.innerHTML = `<a href="${scihubLink}" target="_blank" class="text-amber-600 hover:text-amber-800 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-unlock"></i> Sci-Hub</a>`;
+                    } else {
+                        const doiLink = `https://doi.org/${item.doi}`;
+                        statusEl.innerHTML = `<a href="${doiLink}" target="_blank" class="text-slate-500 hover:text-slate-700 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-external-link-alt"></i> View Paper</a>`;
+                    }
                 }
 
             } catch (err) {
-                // Suppress "No PDF found" console spam, log others
-                if (err.message !== "No PDF found") console.warn(err);
-                
+                console.warn(err);
                 document.getElementById('failedCount').textContent = parseInt(document.getElementById('failedCount').textContent) + 1;
                 
-                if (pdfUrl) {
-                    // Case 1: We found a link, but auto-download blocked/failed
-                    const statusEl = document.getElementById(`status-${item.id}`);
-                    statusEl.innerHTML = `<a href="${pdfUrl}" target="_blank" class="text-amber-600 hover:text-amber-800 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-external-link-alt"></i> Manual Download</a>`;
+                const statusEl = document.getElementById(`status-${item.id}`);
+                if (useScihub) {
+                    const scihubLink = SCIHUB_BASE + item.doi;
+                    statusEl.innerHTML = `<a href="${scihubLink}" target="_blank" class="text-amber-600 hover:text-amber-800 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-unlock"></i> Sci-Hub</a>`;
                 } else {
-                    // Case 2: No link found at all (Closed Source)
-                    updateRowUI(item.id, "Non-Open Access", "text-slate-400 font-medium italic");
+                    const doiLink = `https://doi.org/${item.doi}`;
+                    statusEl.innerHTML = `<a href="${doiLink}" target="_blank" class="text-slate-500 hover:text-slate-700 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-external-link-alt"></i> View Paper</a>`;
                 }
             }
 
@@ -311,31 +308,6 @@
             return null;
         }
 
-        async function fetchBlob(url) {
-            // Try direct first (for open Access)
-            try {
-                const res = await fetch(url);
-                if(res.ok) {
-                    const b = await res.blob();
-                    if(b.size > 1000 && (await b.slice(0,4).text()) === '%PDF') return b;
-                }
-            } catch(e) {}
-
-            // Try Proxies
-            for (const proxy of PROXIES) {
-                try {
-                    const res = await fetch(proxy + encodeURIComponent(url), { credentials: 'omit' });
-                    if (!res.ok) continue;
-                    const blob = await res.blob();
-                    if (blob.size < 1000) throw new Error("Empty file");
-                    const header = await blob.slice(0, 4).text();
-                    if (header !== '%PDF') throw new Error("Not a PDF");
-                    return blob;
-                } catch (e) {}
-            }
-            throw new Error("Download failed");
-        }
-
         // --- UI Functions ---
         function renderList() {
             const tbody = document.getElementById('resultsBody');
@@ -369,17 +341,13 @@
                 start.classList.add('hidden');
                 stop.classList.remove('hidden');
                 document.getElementById('doiInput').disabled = true;
+                document.getElementById('scihubToggle').disabled = true;
             } else {
                 start.classList.remove('hidden');
                 stop.classList.add('hidden');
                 document.getElementById('doiInput').disabled = false;
+                document.getElementById('scihubToggle').disabled = false;
             }
-        }
-
-        function saveZip() {
-            zipData.generateAsync({ type: "blob" }).then(content => {
-                saveAs(content, `papers_batch_${new Date().toISOString().slice(0,10)}.zip`);
-            });
         }
 
         function clearAll() {
@@ -389,7 +357,6 @@
                 document.getElementById('successCount').textContent = '0';
                 document.getElementById('failedCount').textContent = '0';
                 document.getElementById('progressBar').style.width = '0%';
-                document.getElementById('zipCard').classList.add('hidden');
             }
         }
     </script>
