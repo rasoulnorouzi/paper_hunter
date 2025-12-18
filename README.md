@@ -1,32 +1,33 @@
-# paper_hunter
+# Paper Hunter
 
-## Google Colab
+A tool to bulk download academic papers using DOIs.
 
-You can run paper_hunter directly in Google Colab using the following link:
+## Requirements
 
-[Open in Google Colab](https://colab.research.google.com/drive/14bwLx236L6G_D9cZS2_-kdoyzXIfXila?usp=sharing)
+- **Python 3.13** (or Miniconda with Python 3.13)
 
-### Input CSV Requirement
+## Installation & Launch
 
-The uploaded CSV file is expected to have a column named exactly `doi` (lowercase). Each row in that column should contain a valid DOI string. Example:
+1. Double-click `launch_paper_hunter.bat`
+2. **First run only**: Wait a few minutes while required packages are installed
+3. The app opens automatically in your browser
+
+## How to Use
+
+1. Copy your DOIs (one per line)
+2. Paste them into the text input field in the app
+3. Click the download button
+4. Papers will be downloaded to your specified folder
+
+### Example Input
 
 ```
-doi
 10.1038/nphys1170
 10.1126/science.aba2420
+10.1016/j.cell.2020.06.043
 ```
 
-You can use `sample_doi.csv` in this repository as a template.
+## Troubleshooting
 
-### Quick Usage (Colab)
-1. Open the Colab link above.
-2. Upload your CSV file (with the `doi` column) to the Colab environment (e.g., via the file sidebar or code cell).
-3. Update any path variables in the notebook if required.
-4. Run the cells to process the DOIs.
-
-If the `doi` column is missing or differently named, the notebook will not recognize your inputs.
-
-### Notes
-- Ensure there are no extra spaces in the header (e.g., not ` doi`).
-- Additional metadata columns are ignored unless otherwise documented.
-- Rows with empty DOI values are skipped.
+- **App doesn't start?** Make sure Python 3.11 is installed and added to PATH
+- **Downloads failing?** Some papers may not be freely accessible
