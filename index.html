@@ -175,6 +175,7 @@
             
             let pdfUrl = null;
             let title = item.doi;
+            let isOpenAccess = false; // Track OA status from APIs
             const useScihub = document.getElementById('scihubToggle').checked;
 
             try {
@@ -185,6 +186,11 @@
                 if (metaRes && metaRes.ok) {
                     const data = await metaRes.json();
                     title = data.title || title;
+                    
+                    // Check OA status from OpenAlex
+                    if (data.open_access?.is_oa) {
+                        isOpenAccess = true;
+                    }
                     
                     // Direct Link?
                     pdfUrl = data.open_access?.oa_url || data.best_oa_location?.pdf_url;
@@ -208,6 +214,11 @@
                                 if(titleEl) titleEl.innerText = title;
                             }
                             
+                            // Check OA status from Unpaywall
+                            if (upwData.is_oa) {
+                                isOpenAccess = true;
+                            }
+                            
                             if (upwData.best_oa_location && upwData.best_oa_location.url_for_pdf) {
                                 pdfUrl = upwData.best_oa_location.url_for_pdf;
                             }
@@ -221,23 +232,54 @@
                     pdfUrl = await deepScan(item.doi);
                 }
 
-                // 4. Show Link
-                if (pdfUrl) {
-                    // Open Access - Show direct PDF link
-                    const statusEl = document.getElementById(`status-${item.id}`);
-                    statusEl.innerHTML = `<a href="${pdfUrl}" target="_blank" class="text-emerald-600 hover:text-emerald-800 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-download"></i> Download PDF</a>`;
+                // 4. Show Link - Handle different scenarios
+                const statusEl = document.getElementById(`status-${item.id}`);
+                const doiLink = `https://doi.org/${item.doi}`;
+                
+                if (pdfUrl && isOpenAccess) {
+                    // Case: Open Access - Direct PDF link available
+                    statusEl.innerHTML = `<a href="${pdfUrl}" target="_blank" class="text-emerald-600 hover:text-emerald-800 hover:underline font-bold flex items-center justify-end gap-1"><span class="bg-emerald-100 text-emerald-700 text-[10px] px-1.5 py-0.5 rounded mr-1">Open Access</span><i class="fa-solid fa-download"></i> PDF</a>`;
                     document.getElementById('successCount').textContent = parseInt(document.getElementById('successCount').textContent) + 1;
-                } else {
-                    // Non-Open Access - Show Sci-Hub or DOI link based on toggle
-                    const statusEl = document.getElementById(`status-${item.id}`);
+                } else if (pdfUrl && !isOpenAccess) {
+                    // Case: Found PDF from deep scan but not confirmed OA
+                    statusEl.innerHTML = `<a href="${pdfUrl}" target="_blank" class="text-emerald-600 hover:text-emerald-800 hover:underline font-bold flex items-center justify-end gap-1"><span class="bg-emerald-100 text-emerald-700 text-[10px] px-1.5 py-0.5 rounded mr-1">Open Access</span><i class="fa-solid fa-download"></i> PDF</a>`;
+                    document.getElementById('successCount').textContent = parseInt(document.getElementById('successCount').textContent) + 1;
+                } else if (!pdfUrl && title !== item.doi) {
+                    // Case: Non-OA - We have metadata but no direct PDF
                     document.getElementById('failedCount').textContent = parseInt(document.getElementById('failedCount').textContent) + 1;
                     
                     if (useScihub) {
-                        const scihubLink = SCIHUB_BASE + item.doi;
-                        statusEl.innerHTML = `<a href="${scihubLink}" target="_blank" class="text-amber-600 hover:text-amber-800 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-unlock"></i> Sci-Hub</a>`;
+                        // Sci-Hub ON: Check Sci-Hub for PDF availability
+                        updateRowUI(item.id, "Checking Sci-Hub...", "text-amber-500 animate-pulse-fast");
+                        const scihubPdfUrl = await checkScihub(item.doi);
+                        
+                        if (scihubPdfUrl) {
+                            // Sci-Hub has the PDF
+                            statusEl.innerHTML = `<a href="${scihubPdfUrl}" target="_blank" class="text-amber-600 hover:text-amber-800 hover:underline font-bold flex items-center justify-end gap-1"><span class="bg-amber-100 text-amber-700 text-[10px] px-1.5 py-0.5 rounded mr-1">Sci-Hub</span><i class="fa-solid fa-unlock"></i> PDF</a>`;
+                        } else {
+                            // Sci-Hub doesn't have it, fall back to journal link
+                            statusEl.innerHTML = `<a href="${doiLink}" target="_blank" class="text-blue-500 hover:text-blue-700 hover:underline flex items-center justify-end gap-1"><span class="bg-blue-100 text-blue-700 text-[10px] px-1.5 py-0.5 rounded mr-1">Journal</span><i class="fa-solid fa-external-link"></i></a>`;
+                        }
                     } else {
-                        const doiLink = `https://doi.org/${item.doi}`;
-                        statusEl.innerHTML = `<a href="${doiLink}" target="_blank" class="text-slate-500 hover:text-slate-700 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-external-link-alt"></i> View Paper</a>`;
+                        // Sci-Hub OFF: Show DOI link to journal page
+                        statusEl.innerHTML = `<a href="${doiLink}" target="_blank" class="text-blue-500 hover:text-blue-700 hover:underline flex items-center justify-end gap-1"><span class="bg-blue-100 text-blue-700 text-[10px] px-1.5 py-0.5 rounded mr-1">Journal</span><i class="fa-solid fa-external-link"></i></a>`;
+                    }
+                } else {
+                    // Case: No valid link found - couldn't get metadata or DOI is invalid
+                    document.getElementById('failedCount').textContent = parseInt(document.getElementById('failedCount').textContent) + 1;
+                    
+                    if (useScihub) {
+                        // Still try Sci-Hub as last resort
+                        updateRowUI(item.id, "Trying Sci-Hub...", "text-amber-500 animate-pulse-fast");
+                        const scihubPdfUrl = await checkScihub(item.doi);
+                        
+                        if (scihubPdfUrl) {
+                            statusEl.innerHTML = `<a href="${scihubPdfUrl}" target="_blank" class="text-amber-600 hover:text-amber-800 hover:underline font-bold flex items-center justify-end gap-1"><span class="bg-amber-100 text-amber-700 text-[10px] px-1.5 py-0.5 rounded mr-1">Sci-Hub</span><i class="fa-solid fa-unlock"></i> PDF</a>`;
+                        } else {
+                            statusEl.innerHTML = `<span class="text-red-400 flex items-center justify-end gap-1"><i class="fa-solid fa-circle-xmark text-[10px]"></i> <span class="text-xs">No Link Found</span></span>`;
+                        }
+                    } else {
+                        statusEl.innerHTML = `<span class="text-red-400 flex items-center justify-end gap-1"><i class="fa-solid fa-circle-xmark text-[10px]"></i> <span class="text-xs">No Link Found</span></span>`;
                     }
                 }
 
@@ -246,12 +288,23 @@
                 document.getElementById('failedCount').textContent = parseInt(document.getElementById('failedCount').textContent) + 1;
                 
                 const statusEl = document.getElementById(`status-${item.id}`);
+                const doiLink = `https://doi.org/${item.doi}`;
+                
+                // Error occurred - still try to provide something useful
                 if (useScihub) {
-                    const scihubLink = SCIHUB_BASE + item.doi;
-                    statusEl.innerHTML = `<a href="${scihubLink}" target="_blank" class="text-amber-600 hover:text-amber-800 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-unlock"></i> Sci-Hub</a>`;
+                    // Sci-Hub ON: Try Sci-Hub as fallback
+                    updateRowUI(item.id, "Trying Sci-Hub...", "text-amber-500 animate-pulse-fast");
+                    const scihubPdfUrl = await checkScihub(item.doi);
+                    
+                    if (scihubPdfUrl) {
+                        statusEl.innerHTML = `<a href="${scihubPdfUrl}" target="_blank" class="text-amber-600 hover:text-amber-800 hover:underline font-bold flex items-center justify-end gap-1"><span class="bg-amber-100 text-amber-700 text-[10px] px-1.5 py-0.5 rounded mr-1">Sci-Hub</span><i class="fa-solid fa-unlock"></i> PDF</a>`;
+                    } else {
+                        // Sci-Hub doesn't have it, fall back to journal link
+                        statusEl.innerHTML = `<a href="${doiLink}" target="_blank" class="text-blue-500 hover:text-blue-700 hover:underline flex items-center justify-end gap-1"><span class="bg-blue-100 text-blue-700 text-[10px] px-1.5 py-0.5 rounded mr-1">Journal</span><i class="fa-solid fa-external-link"></i></a>`;
+                    }
                 } else {
-                    const doiLink = `https://doi.org/${item.doi}`;
-                    statusEl.innerHTML = `<a href="${doiLink}" target="_blank" class="text-slate-500 hover:text-slate-700 hover:underline font-bold flex items-center justify-end gap-1"><i class="fa-solid fa-external-link-alt"></i> View Paper</a>`;
+                    // Sci-Hub OFF: Show DOI link to journal page as fallback
+                    statusEl.innerHTML = `<a href="${doiLink}" target="_blank" class="text-blue-500 hover:text-blue-700 hover:underline flex items-center justify-end gap-1"><span class="bg-blue-100 text-blue-700 text-[10px] px-1.5 py-0.5 rounded mr-1">Journal</span><i class="fa-solid fa-external-link"></i></a>`;
                 }
             }
 
@@ -263,6 +316,77 @@
         }
 
         // --- Scraper Logic ---
+        // Sci-Hub mirrors to try
+        const SCIHUB_MIRRORS = [
+            "https://sci-hub.se/",
+            "https://sci-hub.st/",
+            "https://sci-hub.ru/"
+        ];
+        
+        // Check Sci-Hub for PDF availability and return direct PDF link if found
+        async function checkScihub(doi) {
+            for (const mirror of SCIHUB_MIRRORS) {
+                const scihubUrl = mirror + doi;
+                for (const proxy of PROXIES) {
+                    try {
+                        const res = await fetch(proxy + encodeURIComponent(scihubUrl), { credentials: 'omit' });
+                        if (!res.ok) continue;
+                        const html = await res.text();
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(html, 'text/html');
+                        
+                        // Look for the PDF embed or download button in Sci-Hub page
+                        // Sci-Hub uses an embed with id="pdf" or an iframe
+                        const embed = doc.querySelector('embed#pdf');
+                        if (embed && embed.getAttribute('src')) {
+                            let pdfSrc = embed.getAttribute('src');
+                            // Handle relative URLs
+                            if (pdfSrc.startsWith('//')) {
+                                pdfSrc = 'https:' + pdfSrc;
+                            } else if (pdfSrc.startsWith('/')) {
+                                pdfSrc = mirror.replace(/\/$/, '') + pdfSrc;
+                            }
+                            return pdfSrc;
+                        }
+                        
+                        // Alternative: Look for iframe with PDF
+                        const iframe = doc.querySelector('iframe#pdf');
+                        if (iframe && iframe.getAttribute('src')) {
+                            let pdfSrc = iframe.getAttribute('src');
+                            if (pdfSrc.startsWith('//')) {
+                                pdfSrc = 'https:' + pdfSrc;
+                            } else if (pdfSrc.startsWith('/')) {
+                                pdfSrc = mirror.replace(/\/$/, '') + pdfSrc;
+                            }
+                            return pdfSrc;
+                        }
+                        
+                        // Alternative: Look for any PDF link
+                        const links = doc.querySelectorAll('a[href*=".pdf"], button[onclick*=".pdf"]');
+                        for (const link of links) {
+                            let href = link.getAttribute('href') || '';
+                            if (href.includes('.pdf')) {
+                                if (href.startsWith('//')) {
+                                    href = 'https:' + href;
+                                } else if (href.startsWith('/')) {
+                                    href = mirror.replace(/\/$/, '') + href;
+                                }
+                                return href;
+                            }
+                        }
+                        
+                        // Check if page contains "article not found" message
+                        const bodyText = doc.body?.textContent?.toLowerCase() || '';
+                        if (bodyText.includes('article not found') || bodyText.includes('не найдена')) {
+                            return null; // Sci-Hub doesn't have this paper
+                        }
+                        
+                    } catch (e) { continue; }
+                }
+            }
+            return null; // Sci-Hub doesn't have this paper or couldn't be reached
+        }
+
         async function deepScan(doi) {
             const target = `https://doi.org/${doi}`;
             
