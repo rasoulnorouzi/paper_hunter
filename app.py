@@ -5,16 +5,17 @@ import uuid
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
-import pandas as pd
 import streamlit as st
 
 from plugins_class import (
     PDFDownloadManager,
+    OpenAlexDownloader,
     UnpaywallDownloader,
     CrossrefDownloader,
     SciHubDownloader,
 )
 from utility import headers, scihub_mirrors
+from browser_fetcher import browser_available
 
 
 # --- Helpers: session state management ---
@@ -31,9 +32,14 @@ def _init_state():
     st.session_state.setdefault("results_saved", False)
     st.session_state.setdefault("zip_ready", False)
     st.session_state.setdefault("zip_bytes", None)
+    st.session_state.setdefault("use_browser", browser_available())
 
 
 class StreamlitLogHandler(logging.Handler):
+    # Stable marker so the handler can be recognised across script reruns,
+    # where the class object itself is recreated and isinstance() would fail.
+    _is_streamlit_log_handler = True
+
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
@@ -43,12 +49,14 @@ class StreamlitLogHandler(logging.Handler):
 
 
 def _attach_logging():
-    # Configure root logger once per run
+    # Configure root logger once per process
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    # Avoid adding duplicate handlers across reruns
-    if not any(isinstance(h, StreamlitLogHandler) for h in logger.handlers):
+    # Avoid adding duplicate handlers across reruns. Streamlit re-executes this
+    # script on every rerun, which recreates the class, so check a stable
+    # attribute instead of the class identity.
+    if not any(getattr(h, "_is_streamlit_log_handler", False) for h in logger.handlers):
         sh = StreamlitLogHandler()
         formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
         sh.setFormatter(formatter)
@@ -63,8 +71,14 @@ def _prepare_manager(dois: list[str]):
 
     strategies = [
         UnpaywallDownloader(headers=headers, download_dir=run_dir),
+        OpenAlexDownloader(headers=headers, download_dir=run_dir),
         CrossrefDownloader(headers=headers, download_dir=run_dir),
-        SciHubDownloader(headers=headers, download_dir=run_dir, mirrors=scihub_mirrors),
+        SciHubDownloader(
+            headers=headers,
+            download_dir=run_dir,
+            mirrors=scihub_mirrors,
+            use_browser=st.session_state.get("use_browser", True),
+        ),
     ]
     manager = PDFDownloadManager(strategies=strategies, download_dir=run_dir)
 
@@ -159,6 +173,29 @@ _attach_logging()
 
 st.title("Paper Hunter – Simple Downloader")
 st.caption("Enter DOIs (one per line), download PDFs and a summary.")
+
+# Sidebar: downloader options.
+with st.sidebar:
+    st.header("Options")
+    st.checkbox(
+        "Use headless browser fallback (nodriver)",
+        key="use_browser",
+        help=(
+            "Downloads first try the fast, browserless path (requests plus an "
+            "in-browser-free solver for Sci-Hub's proof-of-work gate). When that "
+            "fails, a real headless Chrome instance driven by nodriver is used to "
+            "get past JavaScript and bot challenges."
+        ),
+    )
+    if browser_available():
+        st.caption("Chrome/nodriver detected: browser fallback can run.")
+    else:
+        st.caption("Chrome/nodriver not detected: browser fallback is unavailable.")
+    st.caption(
+        "Sci-Hub mirrors are shuffled at runtime. Set the environment variables "
+        "`PAPER_HUNTER_BROWSER=0` or `PAPER_HUNTER_HEADLESS=0` to disable the "
+        "browser fallback or to watch it run."
+    )
 
 # Text input for DOIs (one per line)
 doi_input = st.text_area(

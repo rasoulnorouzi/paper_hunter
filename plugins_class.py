@@ -6,9 +6,16 @@ import re
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Iterable, Tuple
+from typing import Optional, Iterable
 from urllib.parse import urljoin
-from utility import headers, generate_random_email, _sanitize_doi, scihub_mirrors
+from utility import headers, generate_random_email, _sanitize_doi, scihub_mirrors, human_delay
+from altcha_solver import find_challenge_url, solve_gate
+from browser_fetcher import (
+    browser_available,
+    browser_enabled,
+    fetch_pdf_with_browser,
+    headless_enabled,
+)
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -22,9 +29,9 @@ class PDFDownloader:
     download_dir: Path
     timeout: int = 15
 
-    def _get(self, url: str, timeout: Optional[int] = None) -> Optional[requests.Response]:
+    def _get(self, url: str, timeout: Optional[int] = None, **kwargs) -> Optional[requests.Response]:
         try:
-            return requests.get(url, headers=self.headers, timeout=timeout or self.timeout)
+            return requests.get(url, headers=self.headers, timeout=timeout or self.timeout, **kwargs)
         except requests.RequestException as e:
             logging.warning(f"GET failed: {url} ({e})")
             return None
@@ -34,6 +41,45 @@ class PDFDownloader:
         path = self.download_dir / f"{_sanitize_doi(doi)}.pdf"
         path.write_bytes(content)
         return path
+
+    def _try_pdf(self, doi: str, url: str) -> Optional[Path]:
+        """Download *url* and save it only if it is a real PDF."""
+        pdf = self._get(url, timeout=30)
+        if pdf and pdf.status_code == 200 and self._is_pdf(pdf.content):
+            return self._save_pdf(doi, pdf.content)
+        return None
+
+    def _crawl_for_pdf(self, doi: str, page_url: str) -> Optional[Path]:
+        """Fetch an HTML page and try the publisher PDF links found on it."""
+        page = self._get(page_url)
+        if not page or page.status_code != 200:
+            return None
+        soup = BeautifulSoup(page.content, "html.parser")
+
+        # Publishers flag the canonical PDF with this meta tag.
+        meta = soup.find("meta", attrs={"name": "citation_pdf_url"})
+        if meta and meta.get("content"):
+            path = self._try_pdf(doi, urljoin(page_url, meta["content"]))
+            if path:
+                return path
+
+        for a in soup.select("a[href]"):
+            href = a["href"]
+            if href.lower().endswith(".pdf"):
+                pdf_url = href if href.startswith("http") else urljoin(page_url, href)
+                path = self._try_pdf(doi, pdf_url)
+                if path:
+                    return path
+        return None
+
+    @staticmethod
+    def _is_pdf(content: bytes) -> bool:
+        """Return True when *content* really starts with a PDF header.
+
+        Publishers and APIs frequently answer with an HTML consent/error page,
+        so a 200 response alone is not enough; rely on the ``%PDF`` magic bytes.
+        """
+        return bool(content) and b"%PDF" in content[:1024]
 
     def try_download(self, doi: str, **kwargs) -> Optional[Path]:
         # Accept extra kwargs to allow passing optional params (e.g., email) to specific strategies.
@@ -64,9 +110,72 @@ class UnpaywallDownloader(PDFDownloader):
             return None
 
         pdf = self._get(pdf_url, timeout=30)
-        if pdf and pdf.status_code == 200 and pdf.content:
+        if pdf and pdf.status_code == 200 and self._is_pdf(pdf.content):
             return self._save_pdf(doi, pdf.content)
+        logging.info("Unpaywall: response was not a valid PDF.")
         return None
+
+
+# --- OpenAlex strategy ---
+class OpenAlexDownloader(PDFDownloader):
+    """OpenAlex strategy: free, legal open-access locations.
+
+    OpenAlex (https://openalex.org) is a fully open bibliographic database and
+    exposes the same open-access locations Unpaywall uses, so it is tried right
+    after Unpaywall and before the publisher link-crawler.
+    """
+
+    api = "https://api.openalex.org/works/doi:"
+
+    def try_download(self, doi: str, email: Optional[str] = None, **kwargs) -> Optional[Path]:
+        params = {"mailto": email} if email else None
+        api_url = f"{self.api}{doi}"
+        logging.info(f"OpenAlex: querying API for {doi}")
+        resp = self._get(api_url, params=params)
+        if not resp or resp.status_code != 200:
+            status = resp.status_code if resp else "N/A"
+            logging.warning(f"OpenAlex API request failed. Status: {status}")
+            return None
+
+        candidates = self._candidate_urls(resp.json() or {})
+        if not candidates:
+            logging.info("OpenAlex: no open-access locations found.")
+            return None
+
+        # Try direct PDF links first, then crawl landing pages. Cap the number of
+        # pages fetched so one DOI cannot trigger a long chain of requests.
+        for candidate in candidates[:8]:
+            if candidate.lower().endswith(".pdf"):
+                path = self._try_pdf(doi, candidate)
+            else:
+                path = self._crawl_for_pdf(doi, candidate)
+            if path:
+                return path
+        return None
+
+    @staticmethod
+    def _candidate_urls(data: dict) -> list[str]:
+        """Collect open-access URLs: direct PDFs first, then landing pages."""
+        seen: set[str] = set()
+        candidates: list[str] = []
+
+        def add(url: Optional[str]) -> None:
+            if url and url not in seen:
+                seen.add(url)
+                candidates.append(url)
+
+        best = data.get("best_oa_location") or {}
+        locations = data.get("locations") or []
+        add(best.get("pdf_url"))
+        for loc in locations:
+            if loc.get("is_oa", True):
+                add(loc.get("pdf_url"))
+        add((data.get("open_access") or {}).get("oa_url"))
+        add(best.get("landing_page_url"))
+        for loc in locations:
+            if loc.get("is_oa", True):
+                add(loc.get("landing_page_url"))
+        return candidates
 
 
 # --- Crossref strategy ---
@@ -105,7 +214,7 @@ class CrossrefDownloader(PDFDownloader):
                 if path:
                     return path
 
-        # 3) crawl linked pages for .pdf anchors
+        # 3) crawl linked pages for PDF links
         # Prioritize pages intended for reading or text mining
         crawl_links = [
             link for link in links if link.get("URL") and (
@@ -120,189 +229,273 @@ class CrossrefDownloader(PDFDownloader):
 
         for link in crawl_links:
             page_url = link.get("URL")
-            if not page_url:
+            if not page_url or page_url.lower().endswith(".pdf"):
                 continue
-            
-            # Avoid re-downloading a URL if it was already tried as a direct PDF
-            if page_url.lower().endswith(".pdf"):
-                continue
+            path = self._crawl_for_pdf(doi, page_url)
+            if path:
+                return path
 
-            page = self._get(page_url)
-            if not page or page.status_code != 200:
-                continue
-            soup = BeautifulSoup(page.content, "html.parser")
-            for a in soup.select('a[href]'):
-                href = a["href"]
-                if href.lower().endswith(".pdf"):
-                    pdf_url = href if href.startswith("http") else urljoin(page_url, href)
-                    path = self._try_pdf(doi, pdf_url)
-                    if path:
-                        return path
-
-        return None
-
-    def _try_pdf(self, doi: str, url: str) -> Optional[Path]:
-        pdf = self._get(url, timeout=30)
-        if pdf and pdf.status_code == 200 and pdf.content:
-            return self._save_pdf(doi, pdf.content)
         return None
 
 
 # --- Sci-Hub strategy ---
-class SciHubDownloader(PDFDownloader):
-    def __init__(self, headers: dict, download_dir: Path, mirrors: list):
-        super().__init__(headers, download_dir)
-        self.mirrors = mirrors
+def extract_pdf_url(soup: BeautifulSoup, base_url: str) -> Optional[str]:
+    """Extract the PDF URL from a Sci-Hub article page.
 
-    def _extract_pdf_url(self, soup: BeautifulSoup, base_url: str) -> Optional[str]:
-        """
-        Extract PDF URL from Sci-Hub page using multiple detection methods.
-        Sci-Hub's HTML structure varies, so we try several approaches.
-        """
-        pdf_url = None
-        
-        # Method 1: Look for embed tag with id='pdf'
+    Sci-Hub's markup has changed repeatedly, so several strategies are tried in
+    order of reliability.  The current layout (sci-hub.st / .su / .ru) serves the
+    PDF through an ``<object data=...>`` element and a ``div.download`` anchor,
+    which earlier versions of this code missed.
+    """
+    pdf_url = None
+
+    # Method 1: <object data="...pdf"> (current Sci-Hub layout)
+    if not pdf_url:
+        for obj in soup.find_all("object"):
+            data = obj.get("data") or obj.get("src") or ""
+            if data and ".pdf" in data.lower():
+                pdf_url = data
+                logging.info("Found PDF via <object data> tag")
+                break
+
+    # Method 2: the download button anchor
+    if not pdf_url:
+        download = soup.select_one("div.download a[href]")
+        if download and ".pdf" in download["href"].lower():
+            pdf_url = download["href"]
+            logging.info("Found PDF via div.download anchor")
+
+    # Method 3: embed tag with id='pdf'
+    if not pdf_url:
         embed_tag = soup.find('embed', id='pdf')
         if embed_tag and embed_tag.get('src'):
             pdf_url = embed_tag.get('src')
             logging.info("Found PDF via embed#pdf tag")
-        
-        # Method 2: Look for any embed tag with PDF src
-        if not pdf_url:
-            for embed in soup.find_all('embed'):
-                src = embed.get('src', '')
-                if src and ('.pdf' in src.lower() or '/pdf/' in src.lower() or '/downloads/' in src.lower()):
-                    pdf_url = src
-                    logging.info("Found PDF via embed tag with PDF src")
-                    break
-        
-        # Method 3: Look for iframe with PDF src
-        if not pdf_url:
-            for iframe in soup.find_all('iframe'):
-                src = iframe.get('src', '')
-                if src and ('.pdf' in src.lower() or '/pdf/' in src.lower() or '/downloads/' in src.lower()):
-                    pdf_url = src
-                    logging.info("Found PDF via iframe tag")
-                    break
-        
-        # Method 4: Look for direct PDF link in buttons or onclick handlers
-        if not pdf_url:
-            for button in soup.find_all('button'):
-                onclick = button.get('onclick', '')
-                # Extract URL from onclick like: location.href='//sci-hub...pdf'
-                match = re.search(r'location\.href\s*=\s*[\'"]([^\'"]+\.pdf[^\'"]*)[\'"]', onclick, re.IGNORECASE)
-                if match:
-                    pdf_url = match.group(1)
-                    logging.info("Found PDF via button onclick")
-                    break
-        
-        # Method 5: Look for anchor tags with PDF href
-        if not pdf_url:
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                # Look for links that contain sci-hub domains and .pdf extension
-                if '.pdf' in href.lower() and ('sci-hub' in href.lower() or href.startswith('/') or href.startswith('//')):                    
-                    pdf_url = href
-                    logging.info("Found PDF via anchor tag")
-                    break
-        
-        # Method 6: Search in all src attributes
-        if not pdf_url:
-            for tag in soup.find_all(src=True):
-                src = tag['src']
-                if '.pdf' in src.lower() or '/downloads/' in src.lower():
-                    pdf_url = src
-                    logging.info(f"Found PDF via {tag.name} src attribute")
-                    break
-        
-        # Method 7: Look for PDF URL in script tags or page content
-        if not pdf_url:
-            page_text = str(soup)
-            # Pattern for Sci-Hub PDF URLs
-            patterns = [
-                r'(//[^"\s]+\.pdf(?:\?[^"\s]*)?)',
-                r'(https?://[^"\s]+\.pdf(?:\?[^"\s]*)?)',
-                r'(/downloads/[^"\s]+)',
-                r'(/pdf/[^"\s]+\.pdf)',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, page_text, re.IGNORECASE)
-                if match:
-                    pdf_url = match.group(1)
-                    logging.info(f"Found PDF via regex pattern in page content")
-                    break
-        
-        if pdf_url:
-            # Normalize the URL
-            if pdf_url.startswith('//'):
-                pdf_url = 'https:' + pdf_url
-            elif not pdf_url.startswith('http'):
-                pdf_url = urljoin(base_url, pdf_url)
-            return pdf_url
-        
+
+    # Method 4: any embed tag with PDF src
+    if not pdf_url:
+        for embed in soup.find_all('embed'):
+            src = embed.get('src', '')
+            if src and ('.pdf' in src.lower() or '/pdf/' in src.lower() or '/downloads/' in src.lower()):
+                pdf_url = src
+                logging.info("Found PDF via embed tag with PDF src")
+                break
+
+    # Method 5: iframe (with or without id='pdf') pointing at a PDF
+    if not pdf_url:
+        for iframe in soup.find_all('iframe'):
+            src = iframe.get('src', '')
+            if src and ('.pdf' in src.lower() or '/pdf/' in src.lower() or '/downloads/' in src.lower()):
+                pdf_url = src
+                logging.info("Found PDF via iframe tag")
+                break
+
+    # Method 6: direct PDF link in buttons or onclick handlers
+    if not pdf_url:
+        for button in soup.find_all('button'):
+            onclick = button.get('onclick', '')
+            match = re.search(r'location\.href\s*=\s*[\'"]([^\'"]+\.pdf[^\'"]*)[\'"]', onclick, re.IGNORECASE)
+            if match:
+                pdf_url = match.group(1)
+                logging.info("Found PDF via button onclick")
+                break
+
+    # Method 7: anchor tags with a PDF href
+    if not pdf_url:
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if '.pdf' in href.lower() and ('sci-hub' in href.lower() or href.startswith('/') or href.startswith('//')):
+                pdf_url = href
+                logging.info("Found PDF via anchor tag")
+                break
+
+    # Method 8: any tag with a PDF-ish src attribute
+    if not pdf_url:
+        for tag in soup.find_all(src=True):
+            src = tag['src']
+            if '.pdf' in src.lower() or '/downloads/' in src.lower():
+                pdf_url = src
+                logging.info("Found PDF via %s src attribute", tag.name)
+                break
+
+    # Method 9: regex sweep over the raw page content
+    if not pdf_url:
+        page_text = str(soup)
+        patterns = [
+            r'"(/(?:storage|downloads|pdf)/[^"\s]+\.pdf[^"\s]*)"',
+            r'(//[^"\s]+\.pdf(?:\?[^"\s]*)?)',
+            r'(https?://[^"\s]+\.pdf(?:\?[^"\s]*)?)',
+            r'(/downloads/[^"\s]+)',
+            r'(/pdf/[^"\s]+\.pdf)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, page_text, re.IGNORECASE)
+            if match:
+                pdf_url = match.group(1)
+                logging.info("Found PDF via regex pattern in page content")
+                break
+
+    if pdf_url:
+        if pdf_url.startswith('//'):
+            pdf_url = 'https:' + pdf_url
+        elif not pdf_url.startswith('http'):
+            pdf_url = urljoin(base_url, pdf_url)
+        return pdf_url
+
+    return None
+
+
+class SciHubDownloader(PDFDownloader):
+    """Sci-Hub strategy: browserless requests first, headless browser as fallback.
+
+    The page is fetched with ``requests`` and, when a mirror presents an Altcha
+    proof-of-work gate, the challenge is solved directly (see
+    :mod:`altcha_solver`).  Only if every mirror fails does the strategy fall
+    back to a real headless browser driven by ``nodriver``.
+    """
+
+    def __init__(
+        self,
+        headers: dict,
+        download_dir: Path,
+        mirrors: list,
+        use_browser: bool = True,
+        headless: Optional[bool] = None,
+    ):
+        super().__init__(headers, download_dir)
+        self.mirrors = mirrors
+        self.use_browser = use_browser and browser_enabled()
+        self.headless = headless_enabled() if headless is None else headless
+
+    def _request_article(self, session: requests.Session, mirror: str, doi: str):
+        """GET an article page, transparently solving an Altcha gate if present."""
+        from urllib.parse import quote
+
+        encoded_doi = quote(doi, safe='')
+        for doi_variant in (doi, encoded_doi):
+            scihub_url = mirror + doi_variant
+            logging.info("Trying mirror: %s with DOI: %s", mirror, doi_variant)
+            try:
+                response = session.get(
+                    scihub_url, headers=self.headers, timeout=20, allow_redirects=True
+                )
+            except requests.RequestException as e:
+                logging.warning("Request to mirror %s failed: %s", mirror, e)
+                continue
+
+            if response.status_code >= 400:
+                logging.warning(
+                    "Mirror %s returned status %s", mirror, response.status_code
+                )
+                continue
+
+            # A proof-of-work gate: solve it and re-request the article page.
+            if find_challenge_url(response.text, response.url):
+                logging.info("Altcha gate detected on %s; solving...", mirror)
+                if solve_gate(
+                    session, response.text, response.url, headers=self.headers, timeout=20
+                ):
+                    try:
+                        response = session.get(
+                            scihub_url,
+                            headers=self.headers,
+                            timeout=20,
+                            allow_redirects=True,
+                        )
+                    except requests.RequestException as e:
+                        logging.warning("Re-request to %s failed: %s", mirror, e)
+                        continue
+                else:
+                    logging.warning("Could not solve Altcha gate on %s", mirror)
+                    continue
+
+            return response
         return None
 
+    def _try_requests(self, doi: str, shuffled_mirrors: list) -> Optional[Path]:
+        """Fast, browserless path: requests (+ Altcha solving) across all mirrors."""
+        session = requests.Session()
+        for index, mirror in enumerate(shuffled_mirrors):
+            if index:
+                human_delay(0.4, 1.2)
+            response = self._request_article(session, mirror, doi)
+            if response is None:
+                continue
+
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'application/pdf' in content_type:
+                logging.info("Direct PDF response from %s", mirror)
+                if response.content and len(response.content) > 1000:
+                    return self._save_pdf(doi, response.content)
+
+            soup = BeautifulSoup(response.content, 'lxml')
+
+            error_indicators = soup.find_all(
+                string=re.compile(
+                    r'article not found|not found in database|unavailable', re.IGNORECASE
+                )
+            )
+            if error_indicators:
+                logging.warning("Paper not found on %s", mirror)
+                continue
+
+            pdf_url = extract_pdf_url(soup, response.url)
+            if not pdf_url:
+                logging.warning("Could not find PDF URL on the page from %s", mirror)
+                continue
+
+            logging.info("Found PDF URL: %s", pdf_url)
+            try:
+                pdf = session.get(
+                    pdf_url, headers=self.headers, timeout=30, allow_redirects=True
+                )
+            except requests.RequestException as e:
+                logging.warning("Failed to download PDF: %s", e)
+                continue
+
+            if pdf and pdf.status_code == 200 and pdf.content:
+                if pdf.content[:4] == b'%PDF' or len(pdf.content) > 10000:
+                    return self._save_pdf(doi, pdf.content)
+                logging.warning("Downloaded content doesn't appear to be a valid PDF")
+            else:
+                status = pdf.status_code if pdf else "N/A"
+                logging.warning("Failed to download PDF from %s. Status: %s", pdf_url, status)
+
+        return None
+
+    def _try_browser(self, doi: str, shuffled_mirrors: list) -> Optional[Path]:
+        """Fallback: drive a real headless browser to get past JS/bot gates."""
+        if not self.use_browser:
+            return None
+        if not browser_available():
+            logging.info("Browser fallback requested but nodriver/Chrome is unavailable.")
+            return None
+
+        filename = f"{_sanitize_doi(doi)}.pdf"
+        logging.info("Sci-Hub: falling back to headless browser for %s", doi)
+        return fetch_pdf_with_browser(
+            doi,
+            shuffled_mirrors,
+            self.download_dir,
+            filename,
+            headless=self.headless,
+            headers=self.headers,
+        )
+
     def try_download(self, doi: str) -> Optional[Path]:
-        logging.info(f"Sci-Hub: trying mirrors for {doi}")
+        logging.info("Sci-Hub: trying mirrors for %s", doi)
         shuffled_mirrors = self.mirrors.copy()
         random.shuffle(shuffled_mirrors)
-        
-        # URL-encode the DOI to handle special characters properly
-        from urllib.parse import quote
-        encoded_doi = quote(doi, safe='')
 
-        for mirror in shuffled_mirrors:
-            # Try both encoded and raw DOI (some mirrors handle them differently)
-            doi_variants = [doi, encoded_doi]
-            
-            for doi_variant in doi_variants:
-                scihub_url = mirror + doi_variant
-                logging.info(f"Trying mirror: {mirror} with DOI: {doi_variant}")
-                
-                try:
-                    response = requests.get(scihub_url, headers=self.headers, timeout=20, allow_redirects=True)
-                    response.raise_for_status()
-                except requests.RequestException as e:
-                    logging.warning(f"Request to mirror {mirror} failed: {e}")
-                    continue
+        path = self._try_requests(doi, shuffled_mirrors)
+        if path:
+            return path
 
-                # Check if we got redirected directly to a PDF
-                content_type = response.headers.get('Content-Type', '').lower()
-                if 'application/pdf' in content_type:
-                    logging.info(f"Direct PDF response from {mirror}")
-                    if response.content and len(response.content) > 1000:  # Sanity check for valid PDF
-                        return self._save_pdf(doi, response.content)
+        path = self._try_browser(doi, shuffled_mirrors)
+        if path:
+            return path
 
-                soup = BeautifulSoup(response.content, 'lxml')
-                
-                # Check if we got an error page (no paper found)
-                error_indicators = soup.find_all(string=re.compile(r'article not found|not found in database|unavailable', re.IGNORECASE))
-                if error_indicators:
-                    logging.warning(f"Paper not found on {mirror}")
-                    continue
-                
-                pdf_url = self._extract_pdf_url(soup, response.url)
-                
-                if pdf_url:
-                    logging.info(f"Found PDF URL: {pdf_url}")
-                    
-                    try:
-                        pdf = requests.get(pdf_url, headers=self.headers, timeout=30, allow_redirects=True)
-                        
-                        if pdf and pdf.status_code == 200 and pdf.content:
-                            # Verify it's actually a PDF (check magic bytes)
-                            if pdf.content[:4] == b'%PDF' or len(pdf.content) > 10000:
-                                return self._save_pdf(doi, pdf.content)
-                            else:
-                                logging.warning(f"Downloaded content doesn't appear to be a valid PDF")
-                        else:
-                            status = pdf.status_code if pdf else "N/A"
-                            logging.warning(f"Failed to download PDF from {pdf_url}. Status: {status}")
-                    except requests.RequestException as e:
-                        logging.warning(f"Failed to download PDF: {e}")
-                else:
-                    logging.warning(f"Could not find PDF URL on the page from {mirror}")
-        
+        logging.error("Sci-Hub: all mirrors failed for %s", doi)
         return None
 
 
@@ -332,6 +525,10 @@ class PDFDownloadManager:
         logging.info(f"Starting download for {len(dois_iter)} DOI(s). Initial email generated.")
 
         for idx, doi in enumerate(dois_iter):
+            # Pause between downloads so a burst of DOIs looks less like a bot.
+            if idx > 0:
+                human_delay()
+
             # regenerate every 50 downloads (after the first batch)
             if idx > 0 and idx % 50 == 0:
                 current_email = generate_random_email()
@@ -342,8 +539,8 @@ class PDFDownloadManager:
             for s in self.strategies:
                 logging.info(f"Trying strategy: {s.__class__.__name__}")
                 try:
-                    # Only pass email to UnpaywallDownloader
-                    if isinstance(s, UnpaywallDownloader):
+                    # Strategies that benefit from a contact email.
+                    if isinstance(s, (UnpaywallDownloader, OpenAlexDownloader)):
                         path = s.try_download(doi, email=current_email)
                     else:
                         path = s.try_download(doi)
@@ -397,6 +594,7 @@ if __name__ == "__main__":
 
     strategies = [
         UnpaywallDownloader(headers=headers, download_dir=download_dir),
+        OpenAlexDownloader(headers=headers, download_dir=download_dir),
         CrossrefDownloader(headers=headers, download_dir=download_dir),
         SciHubDownloader(headers=headers, download_dir=download_dir, mirrors=scihub_mirrors),
     ]
