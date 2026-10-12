@@ -177,6 +177,21 @@ Environment variables:
 
 - `PAPER_HUNTER_BROWSER=0`: turn off the headless-browser fallback.
 - `PAPER_HUNTER_HEADLESS=0`: show the fallback browser window (for debugging).
+- `PAPER_HUNTER_SANDBOX=0`: run Chrome without its security sandbox. Leave the
+  default (`1`, on) for normal desktop use; disable it only where Chrome cannot
+  start with the sandbox (some containers). nodriver already disables it when
+  running as root.
+- `PAPER_HUNTER_PROFILE_DIR=<folder>`: keep the browser profile on disk so a
+  library sign-in survives between runs (otherwise a throwaway profile is used).
+  Don't point this at a profile that is already open in a running Chrome.
+- `PAPER_HUNTER_COOKIES_FILE=<file>`: also persist the session cookies to this
+  file and restore them on the next start (an alternative to the profile dir).
+- `PAPER_HUNTER_SAVE_SCREENSHOTS=0`: stop saving a screenshot of failed pages.
+  By default every page the browser cannot resolve is captured into
+  `debug_screenshots/` next to the PDFs, so a failure can be inspected.
+- `PAPER_HUNTER_PRINT_TO_PDF=1`: as a last resort, render HTML-only article
+  pages to PDF via Chrome's print-to-PDF. Off by default because the result is a
+  printed copy of the page rather than the publisher's PDF.
 - `PAPER_HUNTER_MIN_DELAY` / `PAPER_HUNTER_MAX_DELAY`: bounds of the random
   pause between DOIs, in seconds (defaults `1` and `3`). Set both to `0` to
   turn the pauses off.
