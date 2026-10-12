@@ -14,6 +14,13 @@ A tool to bulk download academic papers using DOIs.
 pip install git+https://github.com/rasoulnorouzi/paper_hunter.git
 ```
 
+To update to the latest code later (pip skips the reinstall while the version
+number is unchanged), force it, and restart any running notebook kernel:
+
+```bash
+pip install --force-reinstall --no-deps git+https://github.com/rasoulnorouzi/paper_hunter.git
+```
+
 Then use it from Python:
 
 ```python
