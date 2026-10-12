@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-hunter"
+version = "0.1.0"
+description = "Bulk download academic papers (PDFs) from a list of DOIs."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Rasoul Norouzi" }]
+dependencies = [
+    "streamlit>=1.36.0",
+    "requests",
+    "beautifulsoup4",
+    "lxml",
+    "pandas",
+    "nodriver",
+]
+
+[project.optional-dependencies]
+notebook = ["jupyter", "openpyxl"]
+
+[project.urls]
+Homepage = "https://github.com/rasoulnorouzi/paper_hunter"
+
+[project.scripts]
+paper-hunter = "paper_hunter_cli:main"
+
+[tool.setuptools]
+# The project is a set of flat modules that import each other by name
+# (e.g. ``from utility import headers``), so they are installed as top-level
+# modules rather than as a package.
+py-modules = [
+    "altcha_solver",
+    "app",
+    "browser_fetcher",
+    "downloader",
+    "paper_hunter_cli",
+    "plugins_class",
+    "utility",
+]

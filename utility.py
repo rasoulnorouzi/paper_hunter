@@ -1,3 +1,4 @@
+import logging
 import os
 import random
 import re
@@ -47,6 +48,59 @@ def generate_random_email():
     domain = random.choice(domains)
     
     return f"{username}@{domain}"
+
+DOI_PATTERN = re.compile(r'10\.\d{4,9}/[^\s]+')
+
+
+def extract_doi(value) -> str | None:
+    """Return the DOI found in *value*, or None for blank / non-DOI values.
+
+    Accepts bare DOIs as well as ``doi:`` prefixes and ``https://doi.org/`` URLs,
+    and ignores surrounding whitespace.
+    """
+    if value is None:
+        return None
+    match = DOI_PATTERN.search(str(value).strip())
+    if not match:
+        return None
+    return match.group(0).rstrip('.,;')
+
+
+def clean_dois(values) -> list[str]:
+    """Extract DOIs from *values*, skipping blanks, non-DOIs and duplicates.
+
+    Order is preserved; duplicates are detected case-insensitively because DOIs
+    are case-insensitive.
+    """
+    dois, seen, skipped = [], set(), 0
+    for value in values:
+        doi = extract_doi(value)
+        if doi is None:
+            if value is not None and str(value).strip() and str(value).strip().lower() != 'nan':
+                skipped += 1
+            continue
+        if doi.lower() not in seen:
+            seen.add(doi.lower())
+            dois.append(doi)
+    if skipped:
+        logging.warning(f"Skipped {skipped} value(s) that do not look like DOIs.")
+    return dois
+
+
+def split_dois(dois: list, n_parts: int) -> list[list]:
+    """Split *dois* into *n_parts* contiguous chunks whose sizes differ by at most one.
+
+    *n_parts* is clamped to ``[1, len(dois)]`` so no chunk is ever empty.
+    """
+    n_parts = max(1, min(int(n_parts), len(dois))) if dois else 1
+    size, extra = divmod(len(dois), n_parts)
+    parts, start = [], 0
+    for i in range(n_parts):
+        end = start + size + (1 if i < extra else 0)
+        parts.append(list(dois[start:end]))
+        start = end
+    return parts
+
 
 def _sanitize_doi(doi: str) -> str:
     """

@@ -8,6 +8,40 @@ A tool to bulk download academic papers using DOIs.
 - **Google Chrome / Chromium** (optional) — only needed for the headless-browser
   fallback. Without it the app still works in browserless mode.
 
+## Install with pip
+
+```bash
+pip install git+https://github.com/rasoulnorouzi/paper_hunter.git
+```
+
+Then use it from Python:
+
+```python
+from downloader import load_dois_from_csv, run_bulk_download, zip_downloads_split
+
+dois = load_dois_from_csv("sample_doi.csv")                      # DOI column detected automatically
+results = run_bulk_download(dois, download_dir="fulldownloads")  # DataFrame: doi, success
+zip_downloads_split("fulldownloads", n_splits=5, zip_name="papers")  # papers_part1_of_5.zip ... part5
+```
+
+`load_dois_from_csv` finds the DOI column by itself (columns with "doi" in the
+name first, otherwise any column holding DOIs; pass `column=` to choose), detects
+the separator, and skips empty or whitespace-only rows, non-DOI values and
+duplicates. `doi:10.…` and `https://doi.org/10.…` values work too.
+
+or from the command line:
+
+```bash
+paper-hunter download sample_doi.csv -o fulldownloads --zip   # one ZIP
+paper-hunter download sample_doi.csv -o fulldownloads --splits 5   # five ZIPs
+paper-hunter app                                              # launch the web app
+```
+
+[`examples/download_dois_from_csv.ipynb`](examples/download_dois_from_csv.ipynb)
+walks through the full workflow: install, load DOIs from a CSV, download, then
+export a per-DOI report (CSV, Excel, JSON, Markdown), the failed DOIs and a ZIP
+of everything.
+
 ## Running the app
 
 ### Option A — Windows one-click launcher
@@ -27,21 +61,25 @@ myenv\Scripts\activate
 # Linux / macOS:
 source myenv/bin/activate
 
-# 2. Install dependencies
-pip install -r requirements.txt
+# 2. Install Paper Hunter from GitHub
+pip install git+https://github.com/rasoulnorouzi/paper_hunter.git
 
 # 3. Start the app
-streamlit run app.py
+paper-hunter app
 ```
 
 Then open <http://localhost:8501> if it does not open automatically.
 
 ## How to Use
 
-1. Copy your DOIs (one per line).
-2. Paste them into the text input field in the app.
+1. Paste your DOIs (one per line) into the text field, and/or upload a CSV
+   file. The DOI column is detected automatically and empty rows are skipped.
+2. Optionally move the **Split results into ZIP files** slider, e.g. to 5 to
+   get five ZIPs that each hold about a fifth of the DOIs. You can change it
+   after the run too, without downloading again.
 3. Click **Start Downloading**.
-4. When finished, download the results ZIP (PDFs + `download_summary.csv`).
+4. When finished, download the results ZIP, or each part (PDFs +
+   `download_summary.csv` for that part).
 
 ### Example Input
 

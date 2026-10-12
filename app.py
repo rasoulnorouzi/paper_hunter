@@ -3,7 +3,6 @@ import logging
 import shutil
 import uuid
 from pathlib import Path
-from zipfile import ZipFile, ZIP_DEFLATED
 
 import streamlit as st
 
@@ -14,8 +13,9 @@ from plugins_class import (
     CrossrefDownloader,
     SciHubDownloader,
 )
-from utility import headers, scihub_mirrors
+from utility import headers, scihub_mirrors, clean_dois
 from browser_fetcher import browser_available
+from downloader import read_doi_table, find_doi_column, zip_downloads_split
 
 
 # --- Helpers: session state management ---
@@ -31,7 +31,8 @@ def _init_state():
     st.session_state.setdefault("manager", None)
     st.session_state.setdefault("results_saved", False)
     st.session_state.setdefault("zip_ready", False)
-    st.session_state.setdefault("zip_bytes", None)
+    st.session_state.setdefault("zip_parts", None)  # list of (file name, bytes)
+    st.session_state.setdefault("zip_parts_n", None)
     st.session_state.setdefault("use_browser", browser_available())
 
 
@@ -91,7 +92,8 @@ def _prepare_manager(dois: list[str]):
     st.session_state.stop = False
     st.session_state.results_saved = False
     st.session_state.zip_ready = False
-    st.session_state.zip_bytes = None
+    st.session_state.zip_parts = None
+    st.session_state.zip_parts_n = None
 
 
 def _process_one():
@@ -114,23 +116,30 @@ def _finalize_outputs():
         return
     # Save CSV summary
     manager.save_results_to_csv()
-
-    # Build ZIP in-memory for download
-    run_dir = Path(st.session_state.run_dir)
-    zip_buffer = io.BytesIO()
-    with ZipFile(zip_buffer, mode="w", compression=ZIP_DEFLATED) as zf:
-        # Add all PDFs
-        for pdf in run_dir.glob("*.pdf"):
-            zf.write(pdf, arcname=pdf.name)
-        # Add CSV report if present
-        csv_path = run_dir / "download_summary.csv"
-        if csv_path.exists():
-            zf.write(csv_path, arcname=csv_path.name)
-    zip_buffer.seek(0)
-
-    st.session_state.zip_bytes = zip_buffer.read()
+    _build_zips(st.session_state.get("n_splits", 1))
     st.session_state.zip_ready = True
     st.session_state.results_saved = True
+
+
+def _build_zips(n_splits: int):
+    """Split the processed DOIs into *n_splits* ZIPs (PDFs + summary per part)."""
+    run_dir = Path(st.session_state.run_dir)
+    zip_dir = run_dir / "zips"
+    shutil.rmtree(zip_dir, ignore_errors=True)
+    processed = [r["doi"] for r in st.session_state.manager.results]
+    paths = zip_downloads_split(
+        run_dir, n_splits=n_splits, zip_name="paper_hunter_results", dois=processed, out_dir=zip_dir
+    )
+    st.session_state.zip_parts = [(p.name, p.read_bytes()) for p in paths]
+    st.session_state.zip_parts_n = n_splits
+
+
+@st.cache_data(show_spinner=False)
+def _parse_csv(data: bytes):
+    """Return (detected column, DOIs) for an uploaded CSV. Cached so reruns do not re-parse."""
+    table = read_doi_table(io.BytesIO(data))
+    column = find_doi_column(table)
+    return str(column), clean_dois(table[column])
 
 
 def _reset():
@@ -154,7 +163,8 @@ def _reset():
         "manager",
         "results_saved",
         "zip_ready",
-        "zip_bytes",
+        "zip_parts",
+        "zip_parts_n",
     ]:
         if k == "logs":
             st.session_state[k] = []
@@ -172,7 +182,7 @@ _init_state()
 _attach_logging()
 
 st.title("Paper Hunter – Simple Downloader")
-st.caption("Enter DOIs (one per line), download PDFs and a summary.")
+st.caption("Enter DOIs (one per line) or upload a CSV, then download the PDFs and a summary.")
 
 # Sidebar: downloader options.
 with st.sidebar:
@@ -205,6 +215,36 @@ doi_input = st.text_area(
     key="doi_text_input"
 )
 
+uploaded_csv = st.file_uploader(
+    "…or upload a CSV file (the DOI column is detected automatically)",
+    type=["csv", "tsv", "txt"],
+    key="csv_upload",
+)
+csv_dois = []
+if uploaded_csv is not None:
+    try:
+        csv_column, csv_dois = _parse_csv(uploaded_csv.getvalue())
+        st.caption(f"Detected DOI column **{csv_column}**: {len(csv_dois)} DOI(s).")
+    except Exception as e:
+        st.error(f"Could not read DOIs from {uploaded_csv.name}: {e}")
+
+n_splits = st.slider(
+    "Split results into ZIP files",
+    min_value=1,
+    max_value=50,
+    value=1,
+    key="n_splits",
+    help=(
+        "The DOIs are divided into this many parts of about equal size, in input "
+        "order. Each part is a separate ZIP with its PDFs and a summary CSV. "
+        "You can change this after the run finishes."
+    ),
+)
+
+# Re-split finished results when the slider changes; no need to download again.
+if st.session_state.results_saved and st.session_state.zip_parts_n != n_splits:
+    _build_zips(n_splits)
+
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     run_clicked = st.button("Start Downloading", type="primary")
@@ -212,18 +252,36 @@ with col2:
     stop_clicked = st.button("Stop")
 with col3:
     reset_clicked = st.button("Reset")
+zip_parts = st.session_state.zip_parts or []
 with col4:
-    download_ready = st.session_state.zip_ready and st.session_state.zip_bytes is not None
-    if download_ready:
+    if st.session_state.zip_ready and len(zip_parts) == 1:
         st.download_button(
             label="Download Finally",
-            data=st.session_state.zip_bytes,
-            file_name="paper_hunter_results.zip",
+            data=zip_parts[0][1],
+            file_name=zip_parts[0][0],
             mime="application/zip",
             key="download_final_zip",
         )
     else:
-        st.button("Download Finally", disabled=True, key="download_final_disabled")
+        st.button(
+            "Download Finally",
+            disabled=True,
+            key="download_final_disabled",
+            help="When the results are split, download each part below." if len(zip_parts) > 1 else None,
+        )
+
+if st.session_state.zip_ready and len(zip_parts) > 1:
+    st.write(f"Results split into {len(zip_parts)} ZIP files:")
+    part_cols = st.columns(min(len(zip_parts), 5))
+    for i, (name, data) in enumerate(zip_parts):
+        with part_cols[i % len(part_cols)]:
+            st.download_button(
+                label=f"Part {i + 1}/{len(zip_parts)}",
+                data=data,
+                file_name=name,
+                mime="application/zip",
+                key=f"download_part_{i}",
+            )
 
 
 # Handle actions
@@ -235,25 +293,13 @@ if stop_clicked and st.session_state.running:
     st.session_state.stop = True
 
 if run_clicked:
-    if not doi_input or not doi_input.strip():
-        st.warning("Please enter at least one DOI.")
+    if not (doi_input and doi_input.strip()) and not csv_dois:
+        st.warning("Please enter at least one DOI or upload a CSV file.")
     else:
-        # Parse DOIs from text input (one per line)
-        lines = doi_input.strip().split('\n')
-        dois = []
-        for line in lines:
-            # Clean each line and extract DOI
-            cleaned = line.strip()
-            if cleaned:
-                # Handle various DOI formats (URLs, doi: prefix, etc.)
-                # Extract DOI pattern if present
-                import re
-                doi_match = re.search(r'(10\.\d{4,9}/[^\s]+)', cleaned)
-                if doi_match:
-                    dois.append(doi_match.group(1))
-                elif cleaned.startswith('10.'):
-                    dois.append(cleaned)
-        
+        # One DOI per line plus the uploaded CSV; blank lines, non-DOI values
+        # and duplicates are skipped, and doi.org URLs / "doi:" prefixes work.
+        dois = clean_dois([*(doi_input or "").splitlines(), *csv_dois])
+
         if not dois:
             st.error("No valid DOIs found. DOIs should start with '10.' (e.g., 10.1016/j.jclinepi.2022.01.014)")
             st.stop()
