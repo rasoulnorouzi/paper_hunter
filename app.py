@@ -104,7 +104,7 @@ def _process_one():
 
     doi = st.session_state.dois[i]
     manager: PDFDownloadManager = st.session_state.manager
-    manager.download(doi)
+    manager.download(doi, progress=False)  # the UI shows its own counters
     st.session_state.current_index = i + 1
 
 

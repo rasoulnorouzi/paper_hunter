@@ -506,11 +506,14 @@ class PDFDownloadManager:
         self.download_dir = download_dir
         self.results = []
 
-    def download(self, dois) -> Optional[object]:
+    def download(self, dois, progress: bool = True) -> Optional[object]:
         """
         Accept a single DOI (str) or an iterable/list of DOIs.
         Regenerates the email every 50 downloads and passes the email only to UnpaywallDownloader.
         Returns a tuple (doi, "success"|"fail") for a single DOI input, or a list of such tuples for many.
+
+        With ``progress`` on, a running count (done / succeeded / failed /
+        remaining) is logged before each DOI and a final report at the end.
         """
         # Normalize input to an iterable and detect single vs multiple
         single_input = isinstance(dois, str)
@@ -520,6 +523,8 @@ class PDFDownloadManager:
             dois_iter = list(dois)
 
         results_list = []
+        total = len(dois_iter)
+        n_ok = n_fail = 0
         # initial email for the first batch
         current_email = generate_random_email()
         logging.info(f"Starting download for {len(dois_iter)} DOI(s). Initial email generated.")
@@ -534,6 +539,10 @@ class PDFDownloadManager:
                 current_email = generate_random_email()
                 logging.info(f"Regenerated email for batch starting at index {idx}.")
 
+            if progress:
+                logging.info(
+                    f"[{idx + 1}/{total}] succeeded {n_ok} | failed {n_fail} | remaining {total - idx}"
+                )
             logging.info(f"--- Starting download process for DOI: {doi} ---")
             doi_result = ("", "fail")
             for s in self.strategies:
@@ -558,8 +567,18 @@ class PDFDownloadManager:
             if doi_result[1] == "fail":
                 logging.error(f"No PDF found for {doi} after all strategies.")
                 self.results.append({"doi": doi, "success": False})
+                n_fail += 1
+            else:
+                n_ok += 1
 
             results_list.append(doi_result)
+
+        if progress and total:
+            failed = [d for d, status in zip(dois_iter, results_list) if status[1] == "fail"]
+            logging.info(
+                f"Finished {total} DOI(s): succeeded {n_ok} ({n_ok / total:.1%}) | failed {n_fail}"
+                + (f" -> {', '.join(failed)}" if failed else "")
+            )
 
         # return single tuple for single input, else list
         return results_list[0] if single_input and results_list else results_list
