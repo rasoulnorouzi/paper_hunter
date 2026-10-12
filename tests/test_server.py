@@ -67,11 +67,12 @@ def test_unknown_job(client):
 
 def test_full_run_with_split_zips(client):
     text = "10.1000/a1\n\n10.1000/b2missing\n   \n10.1000/c3\n"
-    job = client.post("/api/jobs", json={"text": text, "use_browser": False}).json()
+    job = client.post("/api/jobs", json={"text": text, "use_browser": False, "parts": 2}).json()
     assert job["total"] == 3
 
     job = wait_until_finished(client, job["id"])
     assert (job["state"], job["done"], job["succeeded"], job["failed"]) == ("done", 3, 2, 1)
+    assert [z["name"].rsplit("_", 3)[-3:] for z in job["zips"]] == [["part1", "of", "2.zip"], ["part2", "of", "2.zip"]]
     assert [r["source"] for r in job["results"]] == ["Fake", "", "Fake"]
     assert len(client.get(f"/api/jobs/{job['id']}?since=2").json()["results"]) == 1
 
@@ -79,8 +80,8 @@ def test_full_run_with_split_zips(client):
     assert summary.status_code == 200
     assert summary.text.splitlines()[0] == "doi,success,source,file"
 
-    files = client.get(f"/api/jobs/{job['id']}/zips?parts=2").json()
-    assert len(files) == 2
+    files = client.get(f"/api/jobs/{job['id']}/zips?parts=3").json()
+    assert len(files) == 3
     first = client.get(files[0]["url"])
     assert first.status_code == 200
     with ZipFile(io.BytesIO(first.content)) as zf:
@@ -94,14 +95,17 @@ def test_zip_download_rejects_other_paths(client):
     assert client.get(f"/api/jobs/{job['id']}/zips/1/..%2Fdownload_summary.csv").status_code == 404
 
 
-def test_stop(client, monkeypatch):
+@pytest.fixture
+def slow_client(tmp_path, monkeypatch):
+    """A client whose fake downloader takes a moment per DOI, so runs can be paused and stopped."""
+
     def slow_manager(run_dir, use_browser=True):
         manager = FakeManager(run_dir)
         original = manager.download
 
         def download(dois, progress=True, should_stop=None):
             def slow_stop():
-                time.sleep(0.05)
+                time.sleep(0.02)
                 return should_stop()
             original(dois, progress, slow_stop)
 
@@ -109,9 +113,67 @@ def test_stop(client, monkeypatch):
         return manager
 
     monkeypatch.setattr("paper_hunter.server.make_manager", slow_manager)
-    dois = "\n".join(f"10.1000/x{i}" for i in range(200))
-    job = client.post("/api/jobs", json={"text": dois}).json()
-    client.post(f"/api/jobs/{job['id']}/stop")
-    job = wait_until_finished(client, job["id"])
+    return TestClient(create_app(tmp_path / "runs"))
+
+
+def start_long_run(client, n=300):
+    dois = "\n".join(f"10.1000/x{i}" for i in range(n))
+    return client.post("/api/jobs", json={"text": dois}).json()["id"]
+
+
+def wait_for_state(client, job_id, state, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["state"] == state:
+            return job
+        time.sleep(0.02)
+    raise AssertionError(f"run never reached state {state!r}")
+
+
+def wait_for_progress(client, job_id, at_least=3, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if client.get(f"/api/jobs/{job_id}").json()["done"] >= at_least:
+            return
+        time.sleep(0.02)
+    raise AssertionError("no progress")
+
+
+def test_stop_makes_the_zip(slow_client):
+    job_id = start_long_run(slow_client)
+    wait_for_progress(slow_client, job_id)
+    slow_client.post(f"/api/jobs/{job_id}/stop")
+    job = wait_until_finished(slow_client, job_id)
     assert job["state"] == "stopped"
-    assert job["done"] < 200
+    assert 0 < job["done"] < 300
+    assert len(job["zips"]) == 1
+    assert slow_client.get(job["zips"][0]["url"]).status_code == 200
+
+
+def test_pause_and_resume(slow_client):
+    job_id = start_long_run(slow_client, n=40)
+    wait_for_progress(slow_client, job_id)
+    slow_client.post(f"/api/jobs/{job_id}/pause")
+    paused = wait_for_state(slow_client, job_id, "paused")
+
+    time.sleep(0.3)  # nothing happens while paused
+    assert slow_client.get(f"/api/jobs/{job_id}").json()["done"] == paused["done"]
+    assert slow_client.post("/api/jobs", json={"text": "10.1000/other"}).status_code == 409
+
+    slow_client.post(f"/api/jobs/{job_id}/resume")
+    job = wait_until_finished(slow_client, job_id)
+    assert (job["state"], job["done"]) == ("done", 40)
+    assert len(job["zips"]) == 1
+
+
+def test_stop_while_paused(slow_client):
+    job_id = start_long_run(slow_client)
+    wait_for_progress(slow_client, job_id)
+    slow_client.post(f"/api/jobs/{job_id}/pause")
+    paused = wait_for_state(slow_client, job_id, "paused")
+    slow_client.post(f"/api/jobs/{job_id}/stop")
+    job = wait_until_finished(slow_client, job_id)
+    assert job["state"] == "stopped"
+    assert job["done"] == paused["done"]
+    assert len(job["zips"]) == 1

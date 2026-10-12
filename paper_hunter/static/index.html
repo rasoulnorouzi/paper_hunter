@@ -38,6 +38,12 @@
       <p id="browser-note" class="muted small" hidden>Chrome was not found on this computer, so this option is off.</p>
 
       <div class="row">
+        <label for="parts">Put the results in</label>
+        <input type="number" id="parts" min="1" value="1">
+        <span>ZIP file(s)</span>
+      </div>
+
+      <div class="row">
         <button type="button" id="start" class="primary" disabled>Start</button>
       </div>
       <p id="input-error" class="error" hidden></p>
@@ -52,8 +58,9 @@
       </div>
       <progress id="bar" value="0" max="1"></progress>
       <p id="state" class="muted"></p>
-      <div class="row">
-        <button type="button" id="stop">Stop</button>
+      <div class="row" id="controls">
+        <button type="button" id="pause">Pause</button>
+        <button type="button" id="stop">Stop and get the ZIP</button>
       </div>
 
       <div class="table-wrap">
@@ -71,16 +78,16 @@
 
     <section id="download-section" hidden>
       <h2>3. Download</h2>
+      <ul id="zip-list"></ul>
       <p class="muted small">The PDFs are also saved on this computer in <code id="folder"></code></p>
       <div class="row">
-        <label for="parts">Split into</label>
-        <input type="number" id="parts" min="1" value="1">
-        <span>ZIP file(s)</span>
-        <button type="button" id="make-zips" class="primary">Make ZIP</button>
-      </div>
-      <ul id="zip-list"></ul>
-      <div class="row">
         <a id="summary-link" href="#">Summary (CSV)</a>
+      </div>
+      <div class="row">
+        <label for="resplit">Split differently:</label>
+        <input type="number" id="resplit" min="1" value="1">
+        <span>ZIP file(s)</span>
+        <button type="button" id="make-zips">Make ZIPs</button>
       </div>
       <div class="row">
         <button type="button" id="retry">Retry the ones not found</button>

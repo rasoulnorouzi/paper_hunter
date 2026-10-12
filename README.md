@@ -47,12 +47,17 @@ downloaded from the internet:
 ### Using the web page
 
 1. Paste DOIs (one per line) and/or choose a CSV file. The DOI column is found
-   automatically; empty rows and duplicates are skipped.
-2. Click **Start**. A counter shows how many papers were found and not found,
-   with a row per DOI. **Stop** ends the run after the current paper.
-3. When it finishes, choose how many ZIP files to split the results into and
-   click **Make ZIP**. Each ZIP holds its PDFs and a `download_summary.csv`.
-   **Retry the ones not found** starts a new run with just the missing DOIs.
+   automatically; empty rows, rows with only spaces, and duplicates are skipped.
+2. Choose how many ZIP files to put the results in (for example 5, to get
+   five ZIPs that each hold about a fifth of the papers), then click **Start**.
+3. Counters show how many papers were found and not found, with a row per DOI.
+   - **Pause** stops after the current paper and waits; **Resume** carries on.
+   - **Stop and get the ZIP** ends the run after the current paper and gives
+     you a ZIP of everything downloaded so far.
+4. When the run ends (finished or stopped), the ZIP is made automatically and
+   your browser starts downloading it. With several ZIPs, click each link.
+   Each ZIP holds its PDFs and a `download_summary.csv`. You can also split
+   the results differently afterwards, or **Retry the ones not found**.
 
 The PDFs are also kept on disk, in `paper_hunter_runs/run_<date>_<time>/`.
 

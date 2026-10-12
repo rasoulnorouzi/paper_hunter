@@ -7,6 +7,10 @@ let results = [];
 let pollTimer = null;
 let parseTimer = null;
 let browserAvailable = true;
+let lastState = "";
+let sawActive = false; // this page watched the run while it was going (not a reload of a finished run)
+
+const ACTIVE = ["running", "pausing", "paused", "stopping"];
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -19,7 +23,12 @@ async function api(path, options = {}) {
 }
 
 function input() {
-  return { text: $("dois").value, csv: csvText, use_browser: $("use-browser").checked };
+  return {
+    text: $("dois").value,
+    csv: csvText,
+    use_browser: $("use-browser").checked,
+    parts: Math.max(1, Number($("parts").value) || 1),
+  };
 }
 
 function showError(message) {
@@ -88,7 +97,7 @@ $("start").addEventListener("click", async () => {
 });
 
 function setInputEnabled(enabled) {
-  for (const id of ["dois", "csv", "start"]) $(id).disabled = !enabled;
+  for (const id of ["dois", "csv", "parts", "start"]) $(id).disabled = !enabled;
   $("use-browser").disabled = !enabled || !browserAvailable;
   if (enabled) parse();
 }
@@ -101,11 +110,11 @@ function follow(id) {
   $("results").replaceChildren();
   $("log").textContent = "";
   $("zip-list").replaceChildren();
-  $("parts").value = 1;
   $("progress-section").hidden = false;
   $("download-section").hidden = true;
-  $("stop").hidden = false;
-  $("stop").disabled = false;
+  $("controls").hidden = false;
+  lastState = "";
+  sawActive = false;
   setInputEnabled(false);
   poll();
 }
@@ -121,8 +130,12 @@ async function poll() {
     return;
   }
   render(job);
-  if (["done", "stopped", "error"].includes(job.state)) finished(job);
-  else pollTimer = setTimeout(poll, 1000);
+  if (ACTIVE.includes(job.state)) {
+    sawActive = true;
+    pollTimer = setTimeout(poll, 1000);
+  } else {
+    finished(job);
+  }
 }
 
 function render(job) {
@@ -136,11 +149,19 @@ function render(job) {
   $("log").textContent = job.log.join("\n");
   $("state").textContent = {
     running: `Working on DOI ${Math.min(job.done + 1, job.total)} of ${job.total}…`,
-    stopping: "Stopping after the current paper…",
+    pausing: "Pausing after the current paper…",
+    paused: `Paused after ${job.done} of ${job.total} DOIs. Press Resume to continue.`,
+    stopping: "Stopping after the current paper, then making the ZIP…",
     done: "Finished.",
     stopped: `Stopped after ${job.done} of ${job.total} DOIs.`,
     error: `Stopped because of an error: ${job.error}`,
   }[job.state];
+
+  lastState = job.state;
+  const pausedOrPausing = job.state === "paused" || job.state === "pausing";
+  $("pause").textContent = pausedOrPausing ? "Resume" : "Pause";
+  $("pause").disabled = job.state === "stopping";
+  $("stop").disabled = job.state === "stopping";
 }
 
 function addRow(r) {
@@ -163,54 +184,74 @@ function addRow(r) {
   wrap.scrollTop = wrap.scrollHeight;
 }
 
-$("stop").addEventListener("click", async () => {
+async function control(action) {
+  $("pause").disabled = true;
   $("stop").disabled = true;
   try {
-    render(await api(`/api/jobs/${jobId}/stop`, { method: "POST" }));
+    render(await api(`/api/jobs/${jobId}/${action}`, { method: "POST" }));
   } catch (e) {
-    $("stop").disabled = false;
+    $("state").textContent = e.message;
   }
+  if (ACTIVE.includes(lastState)) {
+    $("pause").disabled = lastState === "stopping";
+    $("stop").disabled = lastState === "stopping";
+  }
+}
+
+$("pause").addEventListener("click", () => {
+  control(lastState === "paused" || lastState === "pausing" ? "resume" : "pause");
 });
 
+$("stop").addEventListener("click", () => control("stop"));
+
 function finished(job) {
-  $("stop").hidden = true;
+  $("controls").hidden = true;
   setInputEnabled(true);
   if (!job.done) return;
   $("download-section").hidden = false;
   $("folder").textContent = job.folder;
-  $("parts").max = job.done;
   $("summary-link").href = `/api/jobs/${jobId}/summary.csv`;
+  $("resplit").value = Math.min(job.parts, job.done);
+  $("resplit").max = job.done;
   $("retry").hidden = job.failed === 0;
-  updateZipButton();
+  showZips(job.zips);
+  // The run just ended while this page watched it: start the download right away.
+  // (Several ZIPs are left as links, since browsers block multiple automatic downloads.)
+  if (sawActive && job.zips.length === 1) {
+    sawActive = false;
+    const a = document.createElement("a");
+    a.href = job.zips[0].url;
+    a.download = job.zips[0].name;
+    document.body.append(a);
+    a.click();
+    a.remove();
+  }
 }
 
 // --- 3. Download -----------------------------------------------------------
 
-function updateZipButton() {
-  $("make-zips").textContent = Number($("parts").value) > 1 ? "Make ZIPs" : "Make ZIP";
+function showZips(files) {
+  $("zip-list").replaceChildren();
+  for (const f of files) {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.href = f.url;
+    a.textContent = f.name;
+    li.append(a, ` (${(f.size / 1048576).toFixed(1)} MB)`);
+    $("zip-list").append(li);
+  }
 }
 
-$("parts").addEventListener("input", updateZipButton);
-
 $("make-zips").addEventListener("click", async () => {
-  const parts = Math.max(1, Number($("parts").value) || 1);
+  const parts = Math.max(1, Number($("resplit").value) || 1);
   $("make-zips").disabled = true;
-  $("zip-list").replaceChildren();
   try {
-    const files = await api(`/api/jobs/${jobId}/zips?parts=${parts}`);
-    for (const f of files) {
-      const li = document.createElement("li");
-      const a = document.createElement("a");
-      a.href = f.url;
-      a.textContent = f.name;
-      li.append(a, ` (${(f.size / 1048576).toFixed(1)} MB)`);
-      $("zip-list").append(li);
-    }
+    showZips(await api(`/api/jobs/${jobId}/zips?parts=${parts}`));
   } catch (e) {
     const li = document.createElement("li");
     li.className = "error";
     li.textContent = e.message;
-    $("zip-list").append(li);
+    $("zip-list").replaceChildren(li);
   }
   $("make-zips").disabled = false;
 });

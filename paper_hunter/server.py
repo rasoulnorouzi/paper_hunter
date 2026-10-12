@@ -4,10 +4,12 @@ API (all JSON unless noted):
 
     GET  /api/info                        browser fallback availability, runs folder, current job
     POST /api/parse                       {text, csv} -> how many DOIs were found (and the CSV column)
-    POST /api/jobs                        {text, csv, use_browser} -> start a run
-    GET  /api/jobs/{id}?since=N           progress, results from index N on, recent log lines
-    POST /api/jobs/{id}/stop              stop after the current DOI
-    GET  /api/jobs/{id}/zips?parts=N      build N ZIP files -> their names and URLs
+    POST /api/jobs                        {text, csv, use_browser, parts} -> start a run
+    GET  /api/jobs/{id}?since=N           progress, results from index N on, recent log lines, ZIPs
+    POST /api/jobs/{id}/pause             pause after the current DOI
+    POST /api/jobs/{id}/resume            continue a paused run
+    POST /api/jobs/{id}/stop              stop after the current DOI; the ZIPs are then made
+    GET  /api/jobs/{id}/zips?parts=N      (re)build the ZIPs split into N parts -> names and URLs
     GET  /api/jobs/{id}/zips/{n}/{name}   download one ZIP (file)
     GET  /api/jobs/{id}/summary.csv       download_summary.csv (file)
 """
@@ -39,28 +41,88 @@ class DoiInput(BaseModel):
     text: str = ""
     csv: str = ""  # contents of an uploaded CSV file
     use_browser: bool = True
+    parts: int = 1  # number of ZIP files made when the run ends
 
 
 class Job:
-    def __init__(self, dois: list[str], run_dir: Path, use_browser: bool):
+    """One run. Pause, resume and stop take effect between DOIs."""
+
+    def __init__(self, dois: list[str], run_dir: Path, use_browser: bool, parts: int = 1):
         self.id = run_dir.name
         self.dois = dois
         self.run_dir = run_dir
         self.use_browser = use_browser
-        self.state = "running"  # running | stopping | done | stopped | error
+        self.parts = max(1, parts)
         self.error = ""
         self.log = deque(maxlen=300)
+        self.zips: list[dict] = []
         self.manager = make_manager(run_dir, use_browser=use_browser)
+        self._resume = threading.Event()
+        self._resume.set()
+        self._stop = False
+        self._waiting = False  # True while the worker sits paused between DOIs
+        self._final = ""  # done | stopped | error once the run has ended
+
+    @property
+    def state(self) -> str:
+        """running | pausing | paused | stopping | done | stopped | error"""
+        if self._final:
+            return self._final
+        if self._stop:
+            return "stopping"
+        if not self._resume.is_set():
+            return "paused" if self._waiting else "pausing"
+        return "running"
+
+    def pause(self) -> None:
+        if not self._final and not self._stop:
+            self._resume.clear()
+
+    def resume(self) -> None:
+        self._resume.set()
+
+    def stop(self) -> None:
+        if not self._final:
+            self._stop = True
+            self._resume.set()  # wake a paused worker so it can stop
+
+    def _checkpoint(self) -> bool:
+        """Called before each DOI: waits while paused, then says whether to stop."""
+        if not self._resume.is_set():
+            logging.info("Paused.")
+            self._waiting = True
+            self._resume.wait()
+            self._waiting = False
+            if not self._stop:
+                logging.info("Resumed.")
+        return self._stop
 
     def run(self) -> None:
         try:
-            self.manager.download(self.dois, progress=False, should_stop=lambda: self.state == "stopping")
+            self.manager.download(self.dois, progress=False, should_stop=self._checkpoint)
             self.manager.save_results_to_csv()
-            self.state = "stopped" if self.state == "stopping" else "done"
+            self.make_zips()
+            self._final = "stopped" if self._stop else "done"
         except Exception as e:  # keep the server alive and show the error in the UI
             logging.exception("Run failed")
             self.error = str(e)
-            self.state = "error"
+            self._final = "error"
+
+    def make_zips(self, parts: int | None = None) -> list[dict]:
+        """Split the processed DOIs into ZIP files (made once per number of parts)."""
+        processed = [r["doi"] for r in self.manager.results]
+        if not processed:
+            return []
+        parts = max(1, min(parts or self.parts, len(processed)))
+        out_dir = self.run_dir / "zips" / str(parts)
+        paths = sorted(out_dir.glob("*.zip")) or zip_downloads_split(
+            self.run_dir, n_splits=parts, zip_name=f"paper_hunter_{self.id}", dois=processed, out_dir=out_dir
+        )
+        self.zips = [
+            {"name": p.name, "size": p.stat().st_size, "url": f"/api/jobs/{self.id}/zips/{parts}/{p.name}"}
+            for p in paths
+        ]
+        return self.zips
 
     def snapshot(self, since: int = 0) -> dict:
         results = list(self.manager.results)
@@ -76,6 +138,8 @@ class Job:
             "failed": len(results) - succeeded,
             "results": results[since:],
             "log": list(self.log),
+            "parts": self.parts,
+            "zips": self.zips,
         }
 
 
@@ -89,7 +153,7 @@ class _JobLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         job = self.server.current
-        if job is not None and job.state in ("running", "stopping"):
+        if job is not None and job.state not in FINISHED:
             job.log.append(self.format(record))
 
 
@@ -128,7 +192,7 @@ class Server:
                 raise HTTPException(409, "A run is already in progress.")
             run_dir = self.runs_dir / datetime.now().strftime("run_%Y%m%d_%H%M%S")
             run_dir.mkdir(parents=True, exist_ok=True)
-            job = Job(dois, run_dir, data.use_browser)
+            job = Job(dois, run_dir, data.use_browser, data.parts)
             self.jobs[job.id] = job
             self.current = job
         threading.Thread(target=job.run, daemon=True).start()
@@ -164,11 +228,22 @@ def create_app(runs_dir: str | Path = "paper_hunter_runs") -> FastAPI:
     def status(job_id: str, since: int = 0):
         return server.job(job_id).snapshot(since)
 
+    @app.post("/api/jobs/{job_id}/pause")
+    def pause(job_id: str):
+        job = server.job(job_id)
+        job.pause()
+        return job.snapshot(len(job.manager.results))
+
+    @app.post("/api/jobs/{job_id}/resume")
+    def resume(job_id: str):
+        job = server.job(job_id)
+        job.resume()
+        return job.snapshot(len(job.manager.results))
+
     @app.post("/api/jobs/{job_id}/stop")
     def stop(job_id: str):
         job = server.job(job_id)
-        if job.state == "running":
-            job.state = "stopping"
+        job.stop()
         return job.snapshot(len(job.manager.results))
 
     @app.get("/api/jobs/{job_id}/zips")
@@ -176,18 +251,10 @@ def create_app(runs_dir: str | Path = "paper_hunter_runs") -> FastAPI:
         job = server.job(job_id)
         if job.state not in FINISHED:
             raise HTTPException(409, "The run is still in progress.")
-        processed = [r["doi"] for r in job.manager.results]
-        if not processed:
+        files = job.make_zips(parts)
+        if not files:
             raise HTTPException(400, "Nothing was processed, so there is nothing to zip.")
-        parts = max(1, min(parts, len(processed)))
-        out_dir = job.run_dir / "zips" / str(parts)
-        paths = sorted(out_dir.glob("*.zip")) or zip_downloads_split(
-            job.run_dir, n_splits=parts, zip_name=f"paper_hunter_{job.id}", dois=processed, out_dir=out_dir
-        )
-        return [
-            {"name": p.name, "size": p.stat().st_size, "url": f"/api/jobs/{job.id}/zips/{parts}/{p.name}"}
-            for p in paths
-        ]
+        return files
 
     @app.get("/api/jobs/{job_id}/zips/{parts}/{name}")
     def zip_file(job_id: str, parts: int, name: str):
