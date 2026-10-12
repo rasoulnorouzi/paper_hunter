@@ -513,7 +513,9 @@ class PDFDownloadManager:
         Returns a tuple (doi, "success"|"fail") for a single DOI input, or a list of such tuples for many.
 
         With ``progress`` on, a running count (done / succeeded / failed /
-        remaining) is logged before each DOI and a final report at the end.
+        remaining) is printed before each DOI and a final report at the end.
+        It is printed rather than logged so it shows up even where logging is
+        configured to hide INFO messages (e.g. Google Colab).
         """
         # Normalize input to an iterable and detect single vs multiple
         single_input = isinstance(dois, str)
@@ -540,8 +542,10 @@ class PDFDownloadManager:
                 logging.info(f"Regenerated email for batch starting at index {idx}.")
 
             if progress:
-                logging.info(
+                print(
                     f"[{idx + 1}/{total}] succeeded {n_ok} | failed {n_fail} | remaining {total - idx}"
+                    f" | now: {doi}",
+                    flush=True,
                 )
             logging.info(f"--- Starting download process for DOI: {doi} ---")
             doi_result = ("", "fail")
@@ -575,9 +579,10 @@ class PDFDownloadManager:
 
         if progress and total:
             failed = [d for d, status in zip(dois_iter, results_list) if status[1] == "fail"]
-            logging.info(
+            print(
                 f"Finished {total} DOI(s): succeeded {n_ok} ({n_ok / total:.1%}) | failed {n_fail}"
-                + (f" -> {', '.join(failed)}" if failed else "")
+                + (f" -> {', '.join(failed)}" if failed else ""),
+                flush=True,
             )
 
         # return single tuple for single input, else list
