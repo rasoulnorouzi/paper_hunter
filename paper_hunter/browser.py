@@ -1,7 +1,7 @@
 """Headless-browser fallback for Sci-Hub, powered by ``nodriver``.
 
 The downloader first tries the fast, browserless path (``requests`` + the Altcha
-proof-of-work solver in :mod:`altcha_solver`).  Only when that fails do we fall
+proof-of-work solver in :mod:`paper_hunter.altcha`).  Only when that fails do we fall
 back to a real Chrome instance driven by `nodriver`, the successor of
 undetected-chromedriver.  A real browser defeats JavaScript challenges, Cloudflare
 interstitials and other bot gates that plain HTTP cannot.
@@ -35,7 +35,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from utility import human_delay
+from .net import human_delay
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +213,7 @@ class BrowserSession:
 
         html = await tab.get_content() or ""
 
-        from plugins_class import extract_pdf_url  # local import avoids cycles
+        from .sources import extract_pdf_url  # local import avoids cycles
 
         soup = BeautifulSoup(html, "lxml")
         pdf_url = extract_pdf_url(soup, getattr(tab.target, "url", url) or url)

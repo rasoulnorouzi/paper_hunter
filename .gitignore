@@ -1,25 +1,33 @@
-# Virtual environment
+# Virtual environments
 myenv/
+.venv/
+venv/
 
-# Streamlit runs
-streamlit_runs/
+# Downloads and results: papers and run output never go into git
+paper_hunter_runs/
+fulldownloads/
+paper_hunter_output/
+*.pdf
+*.zip
+*.xlsx
 
-# Python cache
+# Personal DOI lists stay local; only the example CSV is tracked
+*.csv
+!examples/sample_doi.csv
+
+# Python cache and packaging
 __pycache__/
 *.py[cod]
-*$py.class
-
-__pycache__/
-
-# Distribution / packaging
 *.egg-info/
-dist/
 build/
+dist/
 
-# IDE settings
+# Jupyter and pytest
+.ipynb_checkpoints/
+.pytest_cache/
+
+# IDE and OS files
 .vscode/
 .idea/
-
-# OS files
 .DS_Store
 Thumbs.db

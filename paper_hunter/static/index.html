@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Paper Hunter</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Paper Hunter</h1>
+      <p class="muted">Download PDFs for a list of DOIs.</p>
+    </header>
+
+    <section id="input-section">
+      <h2>1. DOIs</h2>
+      <label for="dois">Paste DOIs, one per line</label>
+      <textarea id="dois" rows="8" spellcheck="false"
+        placeholder="10.1038/nphys1170&#10;https://doi.org/10.1126/science.aba2420&#10;doi:10.1016/j.cell.2020.06.043"></textarea>
+
+      <div class="row">
+        <label class="file-button">
+          <input type="file" id="csv" accept=".csv,.tsv,.txt">
+          Choose CSV file
+        </label>
+        <span id="csv-name" class="muted">No file chosen</span>
+        <button type="button" id="csv-clear" class="link" hidden>Remove</button>
+      </div>
+
+      <p id="parse-status" class="muted">Paste DOIs or choose a CSV file. The DOI column is found automatically.</p>
+
+      <label class="check">
+        <input type="checkbox" id="use-browser" checked>
+        Use Chrome as a last resort for hard-to-get papers
+      </label>
+      <p id="browser-note" class="muted small" hidden>Chrome was not found on this computer, so this option is off.</p>
+
+      <div class="row">
+        <button type="button" id="start" class="primary" disabled>Start</button>
+      </div>
+      <p id="input-error" class="error" hidden></p>
+    </section>
+
+    <section id="progress-section" hidden>
+      <h2>2. Progress</h2>
+      <div class="counters">
+        <div><span id="c-done">0</span> / <span id="c-total">0</span><small>processed</small></div>
+        <div class="ok"><span id="c-ok">0</span><small>found</small></div>
+        <div class="bad"><span id="c-failed">0</span><small>not found</small></div>
+      </div>
+      <progress id="bar" value="0" max="1"></progress>
+      <p id="state" class="muted"></p>
+      <div class="row">
+        <button type="button" id="stop">Stop</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>DOI</th><th>Result</th><th>Source</th></tr></thead>
+          <tbody id="results"></tbody>
+        </table>
+      </div>
+
+      <details>
+        <summary>Log</summary>
+        <pre id="log"></pre>
+      </details>
+    </section>
+
+    <section id="download-section" hidden>
+      <h2>3. Download</h2>
+      <p class="muted small">The PDFs are also saved on this computer in <code id="folder"></code></p>
+      <div class="row">
+        <label for="parts">Split into</label>
+        <input type="number" id="parts" min="1" value="1">
+        <span>ZIP file(s)</span>
+        <button type="button" id="make-zips" class="primary">Make ZIP</button>
+      </div>
+      <ul id="zip-list"></ul>
+      <div class="row">
+        <a id="summary-link" href="#">Summary (CSV)</a>
+      </div>
+      <div class="row">
+        <button type="button" id="retry">Retry the ones not found</button>
+        <button type="button" id="new-run">New run</button>
+      </div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

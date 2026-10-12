@@ -1,3 +1,4 @@
+"""Download sources (Unpaywall, OpenAlex, Crossref, Sci-Hub) and the manager that tries them in order."""
 from __future__ import annotations
 
 import logging
@@ -8,18 +9,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Iterable
 from urllib.parse import urljoin
-from utility import headers, generate_random_email, _sanitize_doi, scihub_mirrors, human_delay
-from altcha_solver import find_challenge_url, solve_gate
-from browser_fetcher import (
+
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+
+from .altcha import find_challenge_url, solve_gate
+from .browser import (
     browser_available,
     browser_enabled,
     fetch_pdf_with_browser,
     headless_enabled,
 )
-import requests
-from bs4 import BeautifulSoup
-import pandas as pd
-
+from .dois import doi_to_filename
+from .net import generate_random_email, human_delay
 
 
 # --- base class with shared helpers (DRY) ---
@@ -38,7 +41,7 @@ class PDFDownloader:
 
     def _save_pdf(self, doi: str, content: bytes) -> Path:
         self.download_dir.mkdir(parents=True, exist_ok=True)
-        path = self.download_dir / f"{_sanitize_doi(doi)}.pdf"
+        path = self.download_dir / f"{doi_to_filename(doi)}.pdf"
         path.write_bytes(content)
         return path
 
@@ -350,7 +353,7 @@ class SciHubDownloader(PDFDownloader):
 
     The page is fetched with ``requests`` and, when a mirror presents an Altcha
     proof-of-work gate, the challenge is solved directly (see
-    :mod:`altcha_solver`).  Only if every mirror fails does the strategy fall
+    :mod:`paper_hunter.altcha`).  Only if every mirror fails does the strategy fall
     back to a real headless browser driven by ``nodriver``.
     """
 
@@ -471,7 +474,7 @@ class SciHubDownloader(PDFDownloader):
             logging.info("Browser fallback requested but nodriver/Chrome is unavailable.")
             return None
 
-        filename = f"{_sanitize_doi(doi)}.pdf"
+        filename = f"{doi_to_filename(doi)}.pdf"
         logging.info("Sci-Hub: falling back to headless browser for %s", doi)
         return fetch_pdf_with_browser(
             doi,
@@ -506,7 +509,7 @@ class PDFDownloadManager:
         self.download_dir = download_dir
         self.results = []
 
-    def download(self, dois, progress: bool = True) -> Optional[object]:
+    def download(self, dois, progress: bool = True, should_stop=None) -> Optional[object]:
         """
         Accept a single DOI (str) or an iterable/list of DOIs.
         Regenerates the email every 50 downloads and passes the email only to UnpaywallDownloader.
@@ -516,6 +519,9 @@ class PDFDownloadManager:
         remaining) is printed before each DOI and a final report at the end.
         It is printed rather than logged so it shows up even where logging is
         configured to hide INFO messages (e.g. Google Colab).
+
+        ``should_stop`` is an optional callable checked before each DOI; when it
+        returns True the remaining DOIs are skipped.
         """
         # Normalize input to an iterable and detect single vs multiple
         single_input = isinstance(dois, str)
@@ -532,6 +538,10 @@ class PDFDownloadManager:
         logging.info(f"Starting download for {len(dois_iter)} DOI(s). Initial email generated.")
 
         for idx, doi in enumerate(dois_iter):
+            if should_stop is not None and should_stop():
+                logging.info(f"Stopped before DOI {idx + 1}/{total}.")
+                break
+
             # Pause between downloads so a burst of DOIs looks less like a bot.
             if idx > 0:
                 human_delay()
@@ -560,7 +570,8 @@ class PDFDownloadManager:
 
                     if path:
                         logging.info(f"SUCCESS with {s.__class__.__name__}. Saved to: {path}")
-                        self.results.append({"doi": doi, "success": True})
+                        source = s.__class__.__name__.removesuffix("Downloader")
+                        self.results.append({"doi": doi, "success": True, "source": source, "file": Path(path).name})
                         doi_result = (doi, "success")
                         break
                     else:
@@ -570,17 +581,18 @@ class PDFDownloadManager:
 
             if doi_result[1] == "fail":
                 logging.error(f"No PDF found for {doi} after all strategies.")
-                self.results.append({"doi": doi, "success": False})
+                self.results.append({"doi": doi, "success": False, "source": "", "file": ""})
                 n_fail += 1
             else:
                 n_ok += 1
 
             results_list.append(doi_result)
 
-        if progress and total:
+        if progress and results_list:
             failed = [d for d, status in zip(dois_iter, results_list) if status[1] == "fail"]
+            done = len(results_list)
             print(
-                f"Finished {total} DOI(s): succeeded {n_ok} ({n_ok / total:.1%}) | failed {n_fail}"
+                f"Finished {done}/{total} DOI(s): succeeded {n_ok} ({n_ok / done:.1%}) | failed {n_fail}"
                 + (f" -> {', '.join(failed)}" if failed else ""),
                 flush=True,
             )
@@ -598,34 +610,3 @@ class PDFDownloadManager:
         output_path = self.download_dir / "download_summary.csv"
         results_df.to_csv(output_path, index=False)
         logging.info(f"Download summary saved to {output_path}")
-
-
-# --- example usage ---
-if __name__ == "__main__":
-    # Configure logging for detailed output
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-
-    download_dir = Path("./fulldownloads")
-    try:
-        dois = pd.read_csv("sample_doi.csv")["doi"].tolist()
-    except FileNotFoundError:
-        logging.error("'sample_doi.csv' not found. Please create it with a 'doi' column.")
-        dois = []
-
-    strategies = [
-        UnpaywallDownloader(headers=headers, download_dir=download_dir),
-        OpenAlexDownloader(headers=headers, download_dir=download_dir),
-        CrossrefDownloader(headers=headers, download_dir=download_dir),
-        SciHubDownloader(headers=headers, download_dir=download_dir, mirrors=scihub_mirrors),
-    ]
-    manager = PDFDownloadManager(strategies=strategies, download_dir=download_dir)
-    
-    if dois:
-        # single call handles list of DOIs and will regenerate email every 50 downloads
-        manager.download(dois)
-        manager.save_results_to_csv()
-# --- end of file ---

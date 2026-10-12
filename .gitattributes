@@ -1,0 +1,5 @@
+# Keep Windows line endings in the Windows starter (batch files can break with LF)
+*.bat -text
+# Unix line endings for the macOS/Linux starters
+*.command text eol=lf
+*.sh text eol=lf
